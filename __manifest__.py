@@ -11,7 +11,7 @@
     'author': 'ARONIA',
     'website': 'http://www.aronia.com',
     'category': '',
-    'depends': ['base','product'],
+    'depends': ['base','product','queue_job'],
     'data': [
         'views/product_product_prestashop.xml',
         'views/view_product_prestashop_number.xml',
@@ -20,6 +20,7 @@
         'security/ir.model.access.csv',
         'data/cron.xml',
         'data/fetch.xml',
+        'data/cron_variante.xml',
     ],
     'installable': True,
     'application': True,
