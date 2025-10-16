@@ -1,0 +1,18 @@
+<odoo>
+    <record id="view_product_product_tree_inherit_export_button" model="ir.ui.view">
+        <field name="name">product.product.tree.export.combination</field>
+        <field name="model">product.product</field>
+        <field name="inherit_id" ref="product.product_product_tree_view"/>
+        <field name="arch" type="xml">
+            <header position="inside">
+                <button name="action_export_to_prestashop_combin"
+                        string="Export to PrestaShop"
+                        type="object"
+                        class="oe_highlight"/>
+            </header>
+            <field name="barcode" position="after">
+                <field name="id_prestashop_variant" readonly="1"/>
+            </field>
+        </field>
+    </record>
+</odoo>

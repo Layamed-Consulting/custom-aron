@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_product_template_tree_inherit_button" model="ir.ui.view">
+        <field name="name">product.template.tree.inherit.button</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_tree_view"/>
+        <field name="arch" type="xml">
+            <header position="inside">
+                <button string="Exporter vers prestashop"
+                        type="object"
+                        name="action_export_to_prestashop"
+                        class="oe_highlight"/>
+            </header>
+        </field>
+    </record>
+</odoo>

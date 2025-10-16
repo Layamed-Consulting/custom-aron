@@ -1,0 +1,6 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_stock_website_order_user,access_stock_website_order_user,module_aronia.model_stock_website_order,,1,1,1,1
+access_stock_website_order_manager,access_stock_website_order_manager,module_aronia.model_stock_website_order,base.group_erp_manager,1,1,1,1
+access_stock_website_order_line_user,access_stock_website_order_line_user,module_aronia.model_stock_website_order_line,,1,1,1,1
+access_stock_website_order_line_manager,access_stock_website_order_line_manager,module_aronia.model_stock_website_order_line,base.group_erp_manager,1,1,1,1
+access_customer_fetch_all,access_customer_fetch_all,module_aronia.model_customer_fetch,,1,1,1,1

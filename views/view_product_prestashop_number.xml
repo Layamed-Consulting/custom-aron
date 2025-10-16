@@ -1,0 +1,13 @@
+<odoo>
+    <record id="view_product_template_form_inherit_prestashop" model="ir.ui.view">
+        <field name="name">product.template.form.inherit.prestashop</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_only_form_view"/>
+        <field name="arch" type="xml">
+            <!-- Insert after detailed_type field -->
+            <field name="detailed_type" position="after">
+                <field name="id_prestashop" readonly="1"/>
+            </field>
+        </field>
+    </record>
+</odoo>
