@@ -51,37 +51,37 @@ class ProductTemplate(models.Model):
             return 0
 
     def _create_prestashop_manufacturer(self, manufacturer_name):
-        """Create a new manufacturer in PrestaShop"""
-        xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
-<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
-  <manufacturer>
-    <active><![CDATA[1]]></active>
-    <name><![CDATA[{manufacturer_name}]]></name>
-  </manufacturer>
-</prestashop>"""
+            """Create a new manufacturer in PrestaShop"""
+            xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+      <manufacturer>
+        <active><![CDATA[1]]></active>
+        <name><![CDATA[{manufacturer_name}]]></name>
+      </manufacturer>
+    </prestashop>"""
 
-        try:
-            response = requests.post(
-                "https://outletna.com/api/manufacturers",
-                auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
-                headers={"Content-Type": "application/xml"},
-                data=xml_data.encode('utf-8'),
-                timeout=30
-            )
+            try:
+                response = requests.post(
+                    "https://outletna.com/api/manufacturers",
+                    auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
+                    headers={"Content-Type": "application/xml"},
+                    data=xml_data.encode('utf-8'),
+                    timeout=30
+                )
 
-            if response.status_code in [200, 201]:
-                import xml.etree.ElementTree as ET
-                root = ET.fromstring(response.content)
-                manufacturer_id = root.find('.//manufacturer/id')
-                if manufacturer_id is not None:
-                    _logger.info(f"✅ Manufacturer '{manufacturer_name}' created with ID: {manufacturer_id.text}")
-                    return int(manufacturer_id.text)
-            else:
-                _logger.error(f"Failed to create manufacturer: {response.text}")
+                if response.status_code in [200, 201]:
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(response.content)
+                    manufacturer_id = root.find('.//manufacturer/id')
+                    if manufacturer_id is not None:
+                        _logger.info(f"✅ Manufacturer '{manufacturer_name}' created with ID: {manufacturer_id.text}")
+                        return int(manufacturer_id.text)
+                else:
+                    _logger.error(f"Failed to create manufacturer: {response.text}")
+                    return 0
+            except Exception as e:
+                _logger.error(f"Error creating manufacturer: {str(e)}")
                 return 0
-        except Exception as e:
-            _logger.error(f"Error creating manufacturer: {str(e)}")
-            return 0
 
     def _get_or_create_prestashop_category(self, category_name, parent_id=2):
         """Get or create PrestaShop category by name"""
@@ -95,7 +95,6 @@ class ProductTemplate(models.Model):
             )
 
             if response.status_code == 200:
-                import xml.etree.ElementTree as ET
                 root = ET.fromstring(response.content)
 
                 # Check if category exists in results
@@ -144,11 +143,10 @@ class ProductTemplate(models.Model):
             )
 
             if response.status_code in [200, 201]:
-                import xml.etree.ElementTree as ET
                 root = ET.fromstring(response.content)
                 category_id = root.find('.//category/id')
                 if category_id is not None:
-                    _logger.info(f"✅ Category '{category_name}' created with ID: {category_id.text}")
+                    _logger.info(f"Category '{category_name}' created with ID: {category_id.text}")
                     return int(category_id.text)
             else:
                 _logger.error(f"Failed to create category: {response.text}")
@@ -184,55 +182,30 @@ class ProductTemplate(models.Model):
 
         return category_ids
 
-    def action_export_to_prestashop(self):
-        """Export only products not yet exported (id_prestashop = 0)"""
-        if not self:
-            raise UserError("No product selected.")
+    def _prepare_product_xml(self, product):
+        """Prepare XML data for a single product"""
+        # default brand
+        manufacturer_id = 0
+        if product.x_studio_marque:
+            manufacturer_id = product._get_or_create_prestashop_manufacturer(product.x_studio_marque)
+        # Get categories
+        category_ids = product._get_product_categories()
+        default_category = category_ids[0] if category_ids else 2
 
-        exported_count = 0
-        skipped_count = 0
-        exported_products = []
+        # Build categories XML
+        categories_xml = '\n            '.join([
+            f'<category><id><![CDATA[{cat_id}]]></id></category>'
+            for cat_id in category_ids
+        ])
+        if manufacturer_id > 0:
+            manufacturer_xml = f'<id_manufacturer xlink:href="https://outletna.com/api/manufacturers/{manufacturer_id}"><![CDATA[{manufacturer_id}]]></id_manufacturer>'
+        else:
+            manufacturer_xml = '<id_manufacturer><![CDATA[0]]></id_manufacturer>'
+        ean_value = product.barcode or ''
+        link_rewrite = product.name.lower().replace(' ', '-')
 
-        for product in self:
-            if product.id_prestashop and product.id_prestashop != 0:
-                skipped_count += 1
-                _logger.info(f"⏩ Skipped: {product.name} (already exported with ID {product.id_prestashop})")
-                continue
-
-            if not product.x_studio_item_id:
-                _logger.warning(f"⚠️ Skipped: {product.name} (missing reference x_studio_item_id)")
-                continue
-
-            _logger.info(f"🚀 Exporting product: {product.name} | Reference: {product.x_studio_item_id}")
-
-            # Get manufacturer ID
-            manufacturer_id = 0
-            if product.x_studio_marque:
-                manufacturer_id = product._get_or_create_prestashop_manufacturer(product.x_studio_marque)
-
-            # Get categories
-            category_ids = product._get_product_categories()
-            default_category = category_ids[0] if category_ids else 2
-
-            # Build categories XML
-            categories_xml = '\n            '.join([
-                f'<category><id><![CDATA[{cat_id}]]></id></category>'
-                for cat_id in category_ids
-            ])
-
-            # Manufacturer XML
-            if manufacturer_id > 0:
-                manufacturer_xml = f'<id_manufacturer xlink:href="https://outletna.com/api/manufacturers/{manufacturer_id}"><![CDATA[{manufacturer_id}]]></id_manufacturer>'
-            else:
-                manufacturer_xml = '<id_manufacturer><![CDATA[0]]></id_manufacturer>'
-
-            ean_value = product.barcode or ''
-            link_rewrite = product.name.lower().replace(' ', '-')
-
-            # XML Product Data
-            xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
-    <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
-      <product>
+        # Return product XML fragment
+        return f"""      <product>
         <id_category_default><![CDATA[{default_category}]]></id_category_default>
         {manufacturer_xml}
         <active><![CDATA[1]]></active>
@@ -260,72 +233,132 @@ class ProductTemplate(models.Model):
             {categories_xml}
           </categories>
         </associations>
-      </product>
+      </product>"""
+
+    def _job_export_products_batch(self, product_ids):
+        """Background job to export a batch of products"""
+        products = self.browse(product_ids)
+
+        if not products:
+            return
+
+        _logger.info(f"JOB: Exporting batch of {len(products)} products...")
+
+        # Build XML for all products
+        products_xml = '\n'.join([self._prepare_product_xml(p) for p in products])
+
+        xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+{products_xml}
     </prestashop>"""
 
-            try:
-                response = requests.post(
-                    "https://outletna.com/api/products",
-                    auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
-                    headers={"Content-Type": "application/xml"},
-                    data=xml_data.encode('utf-8'),
-                    timeout=30
-                )
+        try:
+            response = requests.post(
+                "https://outletna.com/api/products",
+                auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
+                headers={"Content-Type": "application/xml"},
+                data=xml_data.encode('utf-8'),
+                timeout=60
+            )
 
-                if response.status_code in [200, 201]:
-                    root = ET.fromstring(response.content)
-                    prestashop_id = root.find('.//product/id')
-                    if prestashop_id is not None:
-                        product.id_prestashop = int(prestashop_id.text)
+            if response.status_code in [200, 201]:
+                root = ET.fromstring(response.content)
 
-                    exported_count += 1
-                    exported_products.append(product.name)
-                    _logger.info(f"✅ Exported: {product.name} (New ID: {product.id_prestashop})")
+                # Parse response and map IDs back to products
+                for idx, product_elem in enumerate(root.findall('.//product')):
+                    prestashop_id_elem = product_elem.find('id')
+                    if prestashop_id_elem is not None and idx < len(products):
+                        product = products[idx]
+                        prestashop_id = int(prestashop_id_elem.text)
+                        product.id_prestashop = prestashop_id
 
-                    category_names = []
-                    if product.categ_id:
-                        current = product.categ_id
-                        while current and current.name not in ['All', 'All / Saleable']:
-                            category_names.append(current.name)
-                            current = current.parent_id
+                        _logger.info(f"JOB: Exported {product.name} (ID: {prestashop_id})")
 
-                    categories_display = ' > '.join(reversed(category_names)) if category_names else 'Home'
-                    manufacturer_display = f"<br/>Manufacturer: {product.x_studio_marque}" if product.x_studio_marque else ""
+                        # Post message to product
+                        category_names = []
+                        if product.categ_id:
+                            current = product.categ_id
+                            while current and current.name not in ['All', 'All / Saleable']:
+                                category_names.append(current.name)
+                                current = current.parent_id
 
-                    product.message_post(
-                        body=f"✅ Product exported to PrestaShop successfully!<br/>"
-                             f"Product ID: {product.id_prestashop}<br/>"
-                             f"Reference: {product.x_studio_item_id}<br/>"
-                             f"Categories: {categories_display}{manufacturer_display}"
-                    )
+                        categories_display = ' > '.join(reversed(category_names)) if category_names else 'Home'
 
-                else:
-                    _logger.error(f"❌ Error for {product.name}: {response.status_code} - {response.text}")
-                    continue
+                _logger.info(f"JOB: Batch completed successfully")
 
-            except Exception as e:
-                _logger.error(f"⚠️ Exception during export for {product.name}: {e}", exc_info=True)
+            else:
+                _logger.error(f"JOB: Batch export failed: {response.status_code} - {response.text}")
+
+        except Exception as e:
+            _logger.error(f"JOB: Exception during batch export: {e}", exc_info=True)
+            raise
+
+    def action_export_to_prestashop(self):
+        """Export products in background using queue jobs"""
+        if not self:
+            raise UserError("No product selected.")
+
+        BATCH_SIZE = 30  # Products per job
+
+        # Filter products that need export
+        products_to_export = []
+        skipped_count = 0
+
+        for product in self:
+            if product.id_prestashop and product.id_prestashop != 0:
+                skipped_count += 1
+                _logger.info(f"Skipped: {product.name} (already exported)")
                 continue
 
-        _logger.info(f"🎯 Export completed: {exported_count} products exported, {skipped_count} skipped.")
-        _logger.info(f"🧾 Exported product names: {', '.join(exported_products)}")
+            if not product.x_studio_item_id:
+                _logger.warning(f"Skipped: {product.name} (missing reference)")
+                skipped_count += 1
+                continue
+
+            products_to_export.append(product)
+
+        if not products_to_export:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'No Products to Export',
+                    'message': f'{skipped_count} products skipped.',
+                    'type': 'warning',
+                    'sticky': False,
+                }
+            }
+
+        # Create background jobs for each batch
+        total_products = len(products_to_export)
+        total_batches = (total_products + BATCH_SIZE - 1) // BATCH_SIZE
+
+        _logger.info(f"Creating {total_batches} background jobs for {total_products} products")
+
+        for i in range(0, total_products, BATCH_SIZE):
+            batch = products_to_export[i:i + BATCH_SIZE]
+            batch_ids = [p.id for p in batch]
+
+            # Create a background job for this batch
+            self.with_delay(
+                description=f"Export PrestaShop Products (Batch {(i // BATCH_SIZE) + 1}/{total_batches})"
+            )._job_export_products_batch(batch_ids)
+
+        _logger.info(f"Created {total_batches} background jobs")
 
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
-                'title': 'Export Completed',
-                'message': f'{exported_count} products exported successfully. {skipped_count} skipped.',
-                'type': 'success' if exported_count else 'warning',
-                'sticky': False,
+                'title': 'Export Started!',
+                'message': f'{total_products} products queued for export in {total_batches} batch(es). Check Queue Jobs menu for progress.',
+                'type': 'success',
+                'sticky': True,
             }
         }
 
     def cron_export_new_products_to_prestashop(self):
-        """
-        Cron job method: Export products with id_prestashop = 0 or False
-        Runs every 5 minutes to automatically sync new products
-        """
+        """Cron job: Export new products using queue jobs"""
         _logger.info("CRON: Starting automatic PrestaShop export")
         try:
             # Find products that need to be exported
@@ -333,17 +366,19 @@ class ProductTemplate(models.Model):
                 '|',
                 ('id_prestashop', '=', False),
                 ('id_prestashop', '=', 0),
-                ('x_studio_item_id', '!=', False),  # Must have reference
-            ])
+                ('x_studio_item_id', '!=', False),
+            ], limit=100)
+
             if not products_to_export:
-                _logger.info("✅ CRON: No new products to export")
+                _logger.info("CRON: No new products to export")
                 return
-            _logger.info(f"📦 CRON: Found {len(products_to_export)} product(s) to export")
+
+            _logger.info(f"CRON: Found {len(products_to_export)} product(s) to export")
             products_to_export.action_export_to_prestashop()
-            _logger.info("✅ CRON: Export completed successfully")
+            _logger.info("CRON: Jobs created successfully")
 
         except Exception as e:
-            _logger.error(f"❌CRON ERROR: {str(e)}")
+            _logger.error(f"CRON ERROR: {str(e)}")
 
 class ProductProductPrest(models.Model):
     _inherit = "product.product"
@@ -363,7 +398,7 @@ class ProductProductPrest(models.Model):
                 "https://outletna.com/api/product_options",
                 auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                 params={'filter[name]': attribute_name, 'display': 'full'},
-                timeout=30
+                timeout=300
             )
 
             if response.status_code == 200:
@@ -385,7 +420,7 @@ class ProductProductPrest(models.Model):
                 "https://outletna.com/api/product_option_values",
                 auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                 params={'filter[id_attribute_group]': attribute_id, 'display': 'full'},
-                timeout=30
+                timeout=300
             )
 
             if response.status_code == 200:
@@ -425,7 +460,7 @@ class ProductProductPrest(models.Model):
                 auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                 headers={"Content-Type": "application/xml"},
                 data=xml_data.encode('utf-8'),
-                timeout=30
+                timeout=300
             )
 
             if response.status_code in [200, 201]:
@@ -447,7 +482,7 @@ class ProductProductPrest(models.Model):
                 "https://outletna.com/api/categories",
                 auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                 params={'filter[name]': category_name, 'display': 'full'},
-                timeout=30
+                timeout=300
             )
 
             if response.status_code == 200:
@@ -485,7 +520,7 @@ class ProductProductPrest(models.Model):
                 auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                 headers={"Content-Type": "application/xml"},
                 data=xml_data.encode('utf-8'),
-                timeout=30
+                timeout=300
             )
 
             if response.status_code in [200, 201]:
@@ -556,7 +591,7 @@ class ProductProductPrest(models.Model):
                 f"https://outletna.com/api/products/{product_id_prestashop}",
                 auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                 params={'display': 'full'},
-                timeout=30
+                timeout=300
             )
 
             if response.status_code != 200:
@@ -596,7 +631,7 @@ class ProductProductPrest(models.Model):
                 auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                 headers={"Content-Type": "application/xml"},
                 data=updated_xml,
-                timeout=30
+                timeout=300
             )
 
             if update_response.status_code == 200:
@@ -606,7 +641,7 @@ class ProductProductPrest(models.Model):
 
         except Exception as e:
             # Log error but don't fail the combination export
-            self.message_post(body=f"⚠️ Warning: Could not update categories: {str(e)}")
+            self.message_post(body=f"Warning: Could not update categories: {str(e)}")
             return None
 
     def action_export_combination_to_prestashop(self):
@@ -616,16 +651,16 @@ class ProductProductPrest(models.Model):
         template = self.product_tmpl_id
 
         if not template.id_prestashop:
-            raise UserError("❌ PrestaShop Product ID is missing on the template!")
+            raise UserError("PrestaShop Product ID is missing on the template!")
 
         if not self.default_code:
-            raise UserError("❌ Reference / EAN (default_code) is required!")
+            raise UserError("Reference / EAN (default_code) is required!")
 
         # Get variant attributes
         variant_attributes = self._get_variant_attribute_values()
 
         if not variant_attributes:
-            raise UserError("❌ No attributes found on this variant!")
+            raise UserError("No attributes found on this variant!")
 
         # Get or create attribute values in PrestaShop
         option_value_ids = []
@@ -635,7 +670,7 @@ class ProductProductPrest(models.Model):
 
             if not ps_attr_id:
                 raise UserError(
-                    f"❌ Attribute '{attr['prestashop_name']}' not found in PrestaShop. Please create it first.")
+                    f"Attribute '{attr['prestashop_name']}' not found in PrestaShop. Please create it first.")
 
             # Get or create value
             ps_value_id = self._get_or_create_prestashop_attribute_value(ps_attr_id, attr['value'])
@@ -674,7 +709,7 @@ class ProductProductPrest(models.Model):
                 auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                 headers={"Content-Type": "application/xml"},
                 data=xml_data.encode('utf-8'),
-                timeout=30
+                timeout=300
             )
 
             if response.status_code in [200, 201]:
@@ -692,13 +727,6 @@ class ProductProductPrest(models.Model):
                 # Build attributes string
                 attributes_str = ', '.join([f"{a['prestashop_name']}: {a['value']}" for a in variant_attributes])
 
-                self.message_post(
-                    body=f"✅ Combination exported successfully!<br/>"
-                         f"Variant ID: {self.id_prestashop_variant}<br/>"
-                         f"Reference/EAN: {self.default_code}<br/>"
-                         f"Attributes: {attributes_str}{category_info}"
-                )
-
                 return {
                     'type': 'ir.actions.client',
                     'tag': 'display_notification',
@@ -710,16 +738,16 @@ class ProductProductPrest(models.Model):
                 }
 
             else:
-                raise UserError(f"❌ Failed to create combination: {response.status_code}\n{response.text}")
+                raise UserError(f"Failed to create combination: {response.status_code}\n{response.text}")
 
         except Exception as e:
-            raise UserError(f"❌ Error while creating combination: {str(e)}")
+            raise UserError(f"Error while creating combination: {str(e)}")
 
     def action_export_to_prestashop_combin(self):
         """Export one or multiple products to PrestaShop"""
         products = self.filtered(lambda p: not p.id_prestashop_variant)
         if not products:
-            raise UserError("✅ Tous les produits sélectionnés sont déjà exportés vers PrestaShop.")
+            raise UserError("Tous les produits sélectionnés sont déjà exportés vers PrestaShop.")
 
         success_count = 0
         failed = []
@@ -736,9 +764,9 @@ class ProductProductPrest(models.Model):
                 continue
 
         # Build result message
-        msg = f"✅ {success_count} produits exportés avec succès."
+        msg = f"{success_count} produits exportés avec succès."
         if failed:
-            msg += f"\n⚠️ {len(failed)} échecs :\n" + "\n".join(failed[:10])
+            msg += f"\n {len(failed)} échecs :\n" + "\n".join(failed[:10])
             if len(failed) > 10:
                 msg += "\n..."
 
@@ -753,6 +781,76 @@ class ProductProductPrest(models.Model):
                 'sticky': True,
             }
         }
+
+    def job_export_combination(self):
+        """Queue Job: Export this variant to PrestaShop"""
+        self.ensure_one()
+        self.action_export_combination_to_prestashop()
+        return True
+    # ----------------------------
+    # EXPORT WRAPPER FOR MULTIPLE PRODUCTS
+    # ----------------------------
+    def action_export_to_prestashop_combin_queue(self):
+        """Export multiple variants using Queue Job"""
+        products = self.filtered(lambda p: not p.id_prestashop_variant)
+        if not products:
+            raise UserError("Tous les produits sélectionnés sont déjà exportés vers PrestaShop.")
+
+        success_count = 0
+        failed = []
+
+        for product in products:
+            try:
+                product.with_delay().job_export_combination()  # Queue Job
+                success_count += 1
+            except Exception as e:
+                failed.append(f"{product.display_name}: {str(e)}")
+                continue
+
+        msg = f"{success_count} produits mis en file d'attente pour export."
+        if failed:
+            msg += f"\n {len(failed)} échecs :\n" + "\n".join(failed[:10])
+            if len(failed) > 10:
+                msg += "\n..."
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Exportation PrestaShop (file d’attente)',
+                'message': msg,
+                'type': 'success' if success_count else 'warning',
+                'sticky': True,
+            }
+        }
+
+    # ----------------------------
+    # CRON FOR AUTOMATIC EXPORT
+    # ----------------------------
+    @api.model
+    def cron_export_new_combinations_to_prestashop(self):
+        """Cron job: export variants not yet exported"""
+        _logger.info("CRON: Starting automatic PrestaShop variant export")
+        try:
+            products_to_export = self.search([
+                '|',
+                ('id_prestashop_variant', '=', False),
+                ('id_prestashop_variant', '=', 0),
+                ('default_code', '!=', False),
+                ('product_tmpl_id.id_prestashop', '!=', False)
+            ])
+            if not products_to_export:
+                _logger.info(" CRON: No new variants to export")
+                return
+
+            _logger.info(f" CRON: Found {len(products_to_export)} variant(s) to export")
+            for product in products_to_export:
+                product.with_delay().job_export_combination()
+
+            _logger.info("CRON: Variants queued successfully")
+
+        except Exception as e:
+            _logger.error(f" CRON ERROR: {str(e)}", exc_info=True)
 
 class WebsiteOrder(models.Model):
     _name = 'stock.website.order'
@@ -876,7 +974,7 @@ class CustomerFetcher(models.TransientModel):
         order_url = f"{self.API_BASE_URL}/orders/{order_id}"
         try:
             # Use basic authentication here too
-            response = requests.get(order_url, auth=(self.TOKEN, ''), timeout=30)
+            response = requests.get(order_url, auth=(self.TOKEN, ''), timeout=300)
             if response.status_code == 200:
                 tree = ET.fromstring(response.content)
                 order = tree.find('order')
@@ -1005,7 +1103,7 @@ class CustomerFetcher(models.TransientModel):
         """Helper method to fetch data from API"""
         try:
             # Use basic authentication instead of ws_key
-            response = requests.get(url, auth=(self.TOKEN, ''), timeout=30)
+            response = requests.get(url, auth=(self.TOKEN, ''), timeout=300)
             if response.status_code == 200:
                 return response.content
             else:
@@ -1022,7 +1120,7 @@ class CustomerFetcher(models.TransientModel):
 
         try:
             # Use basic authentication
-            response = requests.get(customer_url, auth=(self.TOKEN, ''), timeout=30)
+            response = requests.get(customer_url, auth=(self.TOKEN, ''), timeout=300)
             if response.status_code == 200:
                 tree = ET.fromstring(response.content)
                 firstname = tree.find('.//firstname')
@@ -1103,20 +1201,10 @@ class CustomerFetcher(models.TransientModel):
             # Always update existing partner with PrestaShop data (overwrite existing)
             old_address = partner.street
             partner.write(partner_vals)
-            _logger.info("UPDATED existing partner: %s", partner.name)
-            _logger.info("  - Old Address: '%s'", old_address or 'Empty')
-            _logger.info("  - New Address: '%s'", customer_details.get('address1', ''))
-            _logger.info("  - Email: %s", email)
-            _logger.info("  - Phone: %s", phone)
-            _logger.info("  - Mobile: %s", phone_mobile)
-            _logger.info("  - Address2: %s", customer_details.get('address2', ''))
-            _logger.info("  - City: %s", customer_details.get('city', ''))
-            _logger.info("  - PostCode: %s", customer_details.get('postcode', ''))
-            _logger.info("  - Country: %s", customer_details.get('country', ''))
+
         else:
             # Create new partner with all PrestaShop data
             partner = self.env['res.partner'].create(partner_vals)
-            _logger.info("Created new partner: %s with all PrestaShop details", partner.name)
 
         return partner
 
