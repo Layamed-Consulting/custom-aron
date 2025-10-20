@@ -544,9 +544,9 @@ class ProductProductPrest(models.Model):
 
             # Map common Odoo attribute names to PrestaShop
             # Adjust this mapping based on your attribute names
-            if 'color' in attribute_name.lower() or 'colour' in attribute_name.lower():
+            if 'Color' in attribute_name.lower() or 'Color' in attribute_name.lower():
                 prestashop_attr = 'Color'
-            elif 'size' in attribute_name.lower() or 'taille' in attribute_name.lower():
+            elif 'Size' in attribute_name.lower() or 'Size' in attribute_name.lower():
                 prestashop_attr = 'Size'
             else:
                 prestashop_attr = attribute_name
