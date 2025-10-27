@@ -1,4 +1,4 @@
-from odoo import models, fields, api
+from odoo import models, fields, api,_
 from odoo.exceptions import UserError
 import requests
 from datetime import datetime, timedelta
@@ -17,6 +17,94 @@ class ProductTemplate(models.Model):
         copy=False,
         readonly=True
     )
+    def _delete_product_from_prestashop(self, id_prestashop):
+        """Delete a single product from PrestaShop by ID"""
+        try:
+            response = requests.delete(
+                f"https://outletna.com/api/products/{id_prestashop}",
+                auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
+                timeout=60
+            )
+
+            if response.status_code in [200, 204, 404]:
+                _logger.info(f"Successfully deleted product ID {id_prestashop} from PrestaShop")
+                return True
+            else:
+                _logger.error(
+                    f"Failed to delete product {id_prestashop}: "
+                    f"{response.status_code} - {response.text}"
+                )
+                return False
+
+        except Exception as e:
+            _logger.error(f"Exception deleting product {id_prestashop}: {str(e)}")
+            return False
+
+    def action_delete_product_prestashop(self):
+        """Delete selected products from PrestaShop and Odoo"""
+        if not self:
+            raise UserError(_("No product selected."))
+
+        success_products = []
+        failed_products = []
+
+        for product in self:
+            product_name = product.display_name
+
+            if not product.id_prestashop:
+                _logger.warning(f"Product {product_name} has no PrestaShop ID, skipping")
+                failed_products.append(product_name)
+                continue
+
+            success = product._delete_product_from_prestashop(product.id_prestashop)
+
+            if success:
+                success_products.append(product_name)
+                # Also remove from Odoo
+                product.unlink()
+            else:
+                failed_products.append(product_name)
+
+        # Build detailed notification message
+        message_parts = []
+
+        if success_products:
+            message_parts.append(f"Successfully deleted ({len(success_products)}):")
+            message_parts.append(", ".join(success_products[:10]))
+            if len(success_products) > 10:
+                message_parts.append(f"... and {len(success_products) - 10} more")
+
+        if failed_products:
+            if message_parts:
+                message_parts.append("\n\n")
+            message_parts.append(f"Failed to delete ({len(failed_products)}):")
+            message_parts.append(", ".join(failed_products[:10]))
+            if len(failed_products) > 10:
+                message_parts.append(f"... and {len(failed_products) - 10} more")
+
+        message = "\n".join(message_parts)
+
+        _logger.info(message)
+
+        # Redirect to product template list and show confirmation notification
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Deletion Summary'),
+                'message': message,
+                'type': 'success' if not failed_products else 'warning',
+                'sticky': False,
+                'next': {
+                    'type': 'ir.actions.act_window',
+                    'res_model': 'product.template',
+                    'view_mode': 'tree,form',
+                    'views': [(False, 'tree'), (False, 'form')],
+                    'domain': [],
+                    'target': 'current',
+                }
+            }
+        }
 
     def _get_or_create_prestashop_manufacturer(self, manufacturer_name):
         """Get or create PrestaShop manufacturer by name"""
@@ -389,6 +477,237 @@ class ProductProductPrest(models.Model):
         copy=False,
         readonly=True
     )
+    def action_export_variant_images(self):
+        """Export images for variant/combination to PrestaShop"""
+        self.ensure_one()
+
+        # Validation 1: Check combination ID
+        if not self.id_prestashop_variant or self.id_prestashop_variant == 0:
+            raise UserError("Variant not exported to PrestaShop!\nid_prestashop_variant is missing.")
+
+        # Validation 2: Check template PrestaShop ID
+        if not self.product_tmpl_id.id_prestashop or self.product_tmpl_id.id_prestashop == 0:
+            raise UserError("Product template not exported to PrestaShop!\nid_prestashop is missing.")
+
+        # Validation 3: Check image URLs
+        if not self.x_studio_image1:
+            raise UserError("No image URLs found!\nPlease fill x_studio_image1 field.")
+
+        # Parse URLs (split by semicolon)
+        image_urls = [url.strip() for url in self.x_studio_image1.split(';') if url.strip()]
+
+        if not image_urls:
+            raise UserError("No valid URLs found!")
+        uploaded_image_ids = []
+        uploaded_count = 0
+        failed_count = 0
+
+        # Step 1: Upload images to product
+        for idx, image_url in enumerate(image_urls, 1):
+            _logger.info(f"Processing image {idx}/{len(image_urls)}: {image_url}")
+
+            try:
+                # Download image
+                _logger.info(f"Downloading image from: {image_url}")
+                response = requests.get(image_url, timeout=30)
+
+                if response.status_code != 200:
+                    _logger.error(f"Failed to download: {response.status_code}")
+                    failed_count += 1
+                    continue
+
+                image_data = response.content
+                _logger.info(f"Image downloaded: {len(image_data)} bytes")
+
+                # Upload to PrestaShop product
+                files = {
+                    'image': (f'variant_{self.id_prestashop_variant}_{idx}.jpg', image_data, 'image/jpeg')
+                }
+
+                upload_response = requests.post(
+                    f"https://outletna.com/api/images/products/{self.product_tmpl_id.id_prestashop}",
+                    auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
+                    files=files,
+                    timeout=60
+                )
+
+                if upload_response.status_code in [200, 201]:
+                    root = ET.fromstring(upload_response.content)
+                    image_id = root.find('.//image/id')
+                    if image_id is not None:
+                        image_id_value = int(image_id.text)
+                        uploaded_image_ids.append(image_id_value)
+                        uploaded_count += 1
+                        _logger.info(f"Image uploaded! PrestaShop Image ID: {image_id_value}")
+                else:
+                    _logger.error(f"Upload failed: {upload_response.status_code} - {upload_response.text}")
+                    failed_count += 1
+
+            except Exception as e:
+                _logger.error(f"Error processing image: {str(e)}")
+                failed_count += 1
+
+        # Step 2: Associate images with combination
+        if uploaded_image_ids:
+            _logger.info(
+                f"🔗 Associating {len(uploaded_image_ids)} image(s) with combination {self.id_prestashop_variant}")
+
+            try:
+                # Get current combination data
+                get_response = requests.get(
+                    f"https://outletna.com/api/combinations/{self.id_prestashop_variant}",
+                    auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
+                    params={'display': 'full'},
+                    timeout=30
+                )
+
+                if get_response.status_code == 200:
+                    root = ET.fromstring(get_response.content)
+
+                    # Find or create associations element
+                    combination = root.find('.//combination')
+                    associations = combination.find('associations')
+                    if associations is None:
+                        associations = ET.SubElement(combination, 'associations')
+
+                    # Remove old images if exist
+                    old_images = associations.find('images')
+                    if old_images is not None:
+                        associations.remove(old_images)
+
+                    # Add new images
+                    images_elem = ET.SubElement(associations, 'images')
+                    for img_id in uploaded_image_ids:
+                        image_elem = ET.SubElement(images_elem, 'image')
+                        id_elem = ET.SubElement(image_elem, 'id')
+                        id_elem.text = str(img_id)
+
+                    # Update combination
+                    updated_xml = ET.tostring(root, encoding='utf-8', method='xml')
+
+                    update_response = requests.put(
+                        f"https://outletna.com/api/combinations/{self.id_prestashop_variant}",
+                        auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
+                        headers={"Content-Type": "application/xml"},
+                        data=updated_xml,
+                        timeout=30
+                    )
+
+                    if update_response.status_code == 200:
+                        _logger.info(f"Images successfully associated with combination!")
+                    else:
+                        _logger.error(f"Failed to associate images: {update_response.text}")
+                        raise UserError(f"Failed to associate images with combination: {update_response.text}")
+                else:
+                    raise UserError(f"Failed to get combination data: {get_response.status_code}")
+
+            except Exception as e:
+                _logger.error(f"Error associating images: {str(e)}")
+                raise UserError(f"Error associating images with combination: {str(e)}")
+
+        # Show result
+        message = f" Uploaded: {uploaded_count}\n Failed: {failed_count}"
+        if uploaded_image_ids:
+            message += f"\n🔗 Associated Image IDs: {', '.join(map(str, uploaded_image_ids))}"
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Variant Image Export',
+                'message': message,
+                'type': 'success' if failed_count == 0 else 'warning',
+                'sticky': True,
+            }
+        }
+
+    def _delete_combination_from_prestashop(self, id_prestashop_variant):
+        """Delete a single combination from PrestaShop by ID"""
+        try:
+            response = requests.delete(
+                f"https://outletna.com/api/combinations/{id_prestashop_variant}",
+                auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
+                timeout=60
+            )
+
+            if response.status_code in [200, 204, 404]:
+                _logger.info(f"Successfully deleted combination ID {id_prestashop_variant} from PrestaShop")
+                return True
+            else:
+                _logger.error(
+                    f"Failed to delete combination {id_prestashop_variant}: "
+                    f"{response.status_code} - {response.text}"
+                )
+                return False
+
+        except Exception as e:
+            _logger.error(f"Exception deleting combination {id_prestashop_variant}: {str(e)}")
+            return False
+
+    def action_delete_combination_prestashop(self):
+        """Delete selected variants (combinations) from PrestaShop and Odoo"""
+        if not self:
+            raise UserError(_("No variant selected."))
+
+        success_variants = []
+        failed_variants = []
+
+        for variant in self:
+            variant_name = variant.display_name
+
+            if not variant.id_prestashop_variant:
+                _logger.warning(f"Variant {variant_name} has no PrestaShop combination ID, skipping")
+                failed_variants.append(variant_name)
+                continue
+
+            success = variant._delete_combination_from_prestashop(variant.id_prestashop_variant)
+
+            if success:
+                success_variants.append(variant_name)
+                # Also remove from Odoo
+                variant.unlink()
+            else:
+                failed_variants.append(variant_name)
+
+        # Build detailed notification message
+        message_parts = []
+
+        if success_variants:
+            message_parts.append(f"Successfully deleted ({len(success_variants)}):")
+            message_parts.append(", ".join(success_variants[:10]))
+            if len(success_variants) > 10:
+                message_parts.append(f"... and {len(success_variants) - 10} more")
+
+        if failed_variants:
+            if message_parts:
+                message_parts.append("\n\n")
+            message_parts.append(f"Failed to delete ({len(failed_variants)}):")
+            message_parts.append(", ".join(failed_variants[:10]))
+            if len(failed_variants) > 10:
+                message_parts.append(f"... and {len(failed_variants) - 10} more")
+
+        message = "\n".join(message_parts)
+
+        _logger.info(message)
+
+        # Show confirmation dialog and redirect to product variants page
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Deletion Summary'),
+                'message': message,
+                'type': 'success' if not failed_variants else 'warning',
+                'sticky': False,
+                'next': {
+                    'type': 'ir.actions.act_window',
+                    'res_model': 'product.product',
+                    'view_mode': 'tree,form',
+                    'views': [(False, 'tree'), (False, 'form')],
+                    'domain': [],
+                    'target': 'current',
+                }
+            }
+        }
 
     def _get_prestashop_attribute_id(self, attribute_name):
         """Get or create PrestaShop attribute ID by name (Color, Size, etc.)"""
@@ -881,6 +1200,73 @@ class WebsiteOrder(models.Model):
         ('annuler', 'Annulé'),
     ], string="Statut", default='initial')
 
+    def action_create_sale_order(self):
+        """Create sale order from website order (simple version by client_name)"""
+        for order in self:
+            # Chercher le client par nom
+            partner = self.env['res.partner'].search([('name', 'ilike', order.client_name)], limit=1)
+            if not partner:
+                _logger.warning("Aucun client trouvé avec le nom '%s' pour la commande %s", order.client_name,order.ticket_id)
+                # On crée le client si inexistant
+                partner = self.env['res.partner'].create({
+                    'name': order.client_name or "Client Website inconnu",
+                    'email': order.email or False,
+                    'phone': order.phone or order.mobile or False,
+                    'street': order.adresse or '',
+                    'city': order.city or '',
+                    'zip': order.postcode or '',
+                })
+                _logger.info("Nouveau client créé : %s", partner.name)
+
+            # Créer la commande de vente
+            sale_order_vals = {
+                'partner_id': partner.id,
+                'date_order': order.date_commande or fields.Datetime.now(),
+                'origin': order.reference or order.ticket_id,
+                'note': f"Commande Website - Référence: {order.reference or order.ticket_id}",
+            }
+
+            sale_order = self.env['sale.order'].create(sale_order_vals)
+            _logger.info("Commande de vente %s créée pour la commande website %s", sale_order.name, order.ticket_id)
+
+            # Créer les lignes
+            for line in order.line_ids:
+                if not line.product_id:
+                    _logger.warning("Produit manquant pour la ligne (Code barre: %s)", line.code_barre)
+                    continue
+
+                line_vals = {
+                    'order_id': sale_order.id,
+                    'product_id': line.product_id.id,
+                    'product_uom_qty': line.quantity,
+                    'price_unit': line.price,
+                    'discount': line.discount,
+                }
+                self.env['sale.order.line'].create(line_vals)
+
+            # Lier la commande au website order
+            order.write({
+                'status': 'prepare',
+            })
+            _logger.info("Commande website %s liée à %s", order.ticket_id, sale_order.name)
+
+        return True
+
+    def action_view_sale_order(self):
+        """Open the related sale order"""
+        self.ensure_one()
+        if not self.sale_order_id:
+            raise UserError("Aucune commande de vente associée")
+
+        return {
+            'type': 'ir.actions.act_window',
+            'name': 'Commande de Vente',
+            'res_model': 'sale.order',
+            'res_id': self.sale_order_id.id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
+
 class StockWebsiteOrderLine(models.Model):
     _name = 'stock.website.order.line'
     _description = 'Ligne de commande du site'
@@ -1050,7 +1436,11 @@ class CustomerFetcher(models.TransientModel):
                 _logger.info("   Total Paid: %s MAD", total_paid)
                 _logger.info("   Payment Method: %s", payment_method)
                 _logger.info("=" * 80)
-
+                try:
+                    order_rec.action_create_sale_order()
+                    _logger.info("✅ Sale order automatically created for website order %s", order_id)
+                except Exception as e:
+                    _logger.error("Failed to auto-create sale order for website order %s: %s", order_id, str(e))
             else:
                 _logger.error("Failed to fetch order details for %s, status code: %s", order_id, response.status_code)
         except Exception as e:
@@ -1201,11 +1591,9 @@ class CustomerFetcher(models.TransientModel):
             # Always update existing partner with PrestaShop data (overwrite existing)
             old_address = partner.street
             partner.write(partner_vals)
-
         else:
             # Create new partner with all PrestaShop data
             partner = self.env['res.partner'].create(partner_vals)
-
         return partner
 
     def _get_text_content(self, tree, xpath):
