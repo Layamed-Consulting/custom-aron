@@ -10,6 +10,11 @@
                         type="object"
                         name="action_export_to_prestashop"
                         class="oe_highlight"/>
+                <button string="Delete Full Product Pres-Odoo"
+                        type="object"
+                        name="action_delete_product_prestashop"
+                        class="btn-danger"
+                        confirm="Are you sure you want to delete this product from PrestaShop?"/>
             </header>
         </field>
     </record>

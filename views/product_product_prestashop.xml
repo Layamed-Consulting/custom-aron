@@ -9,6 +9,17 @@
                         string="Export to PrestaShop"
                         type="object"
                         class="oe_highlight"/>
+
+                <button string="Delete Variant from Pres-Odoo"
+                        type="object"
+                        name="action_delete_combination_prestashop"
+                        class="btn-danger"
+                        confirm="Are you sure you want to delete this variant from PrestaShop? This action cannot be undone!"/>
+
+                <button string="Export image"
+                        type="object"
+                        name="action_export_variant_images"
+                        class="oe_highlight"/>
             </header>
             <field name="barcode" position="after">
                 <field name="id_prestashop_variant" readonly="1"/>
