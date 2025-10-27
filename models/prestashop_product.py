@@ -509,7 +509,7 @@ class ProductProductPrest(models.Model):
             try:
                 # Download image
                 _logger.info(f"Downloading image from: {image_url}")
-                response = requests.get(image_url, timeout=30)
+                response = requests.get(image_url, timeout=60)
 
                 if response.status_code != 200:
                     _logger.error(f"Failed to download: {response.status_code}")
@@ -550,7 +550,7 @@ class ProductProductPrest(models.Model):
         # Step 2: Associate images with combination
         if uploaded_image_ids:
             _logger.info(
-                f"🔗 Associating {len(uploaded_image_ids)} image(s) with combination {self.id_prestashop_variant}")
+                f"Associating {len(uploaded_image_ids)} image(s) with combination {self.id_prestashop_variant}")
 
             try:
                 # Get current combination data
@@ -558,7 +558,7 @@ class ProductProductPrest(models.Model):
                     f"https://outletna.com/api/combinations/{self.id_prestashop_variant}",
                     auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                     params={'display': 'full'},
-                    timeout=30
+                    timeout=60
                 )
 
                 if get_response.status_code == 200:
@@ -590,7 +590,7 @@ class ProductProductPrest(models.Model):
                         auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                         headers={"Content-Type": "application/xml"},
                         data=updated_xml,
-                        timeout=30
+                        timeout=60
                     )
 
                     if update_response.status_code == 200:
@@ -608,7 +608,7 @@ class ProductProductPrest(models.Model):
         # Show result
         message = f" Uploaded: {uploaded_count}\n Failed: {failed_count}"
         if uploaded_image_ids:
-            message += f"\n🔗 Associated Image IDs: {', '.join(map(str, uploaded_image_ids))}"
+            message += f"\n Associated Image IDs: {', '.join(map(str, uploaded_image_ids))}"
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
