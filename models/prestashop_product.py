@@ -477,148 +477,216 @@ class ProductProductPrest(models.Model):
         copy=False,
         readonly=True
     )
+
     def action_export_variant_images(self):
-        """Export images for variant/combination to PrestaShop"""
-        self.ensure_one()
+        """Export images for multiple variant/combination to PrestaShop"""
 
-        # Validation 1: Check combination ID
-        if not self.id_prestashop_variant or self.id_prestashop_variant == 0:
-            raise UserError("Variant not exported to PrestaShop!\nid_prestashop_variant is missing.")
+        if not self:
+            raise UserError("No variant selected.")
 
-        # Validation 2: Check template PrestaShop ID
-        if not self.product_tmpl_id.id_prestashop or self.product_tmpl_id.id_prestashop == 0:
-            raise UserError("Product template not exported to PrestaShop!\nid_prestashop is missing.")
+        total_uploaded = 0
+        total_failed = 0
+        all_associated_ids = []
 
-        # Validation 3: Check image URLs
-        if not self.x_studio_image1:
-            raise UserError("No image URLs found!\nPlease fill x_studio_image1 field.")
+        for variant in self:
+            # Validation 1: Check combination ID
+            if not variant.id_prestashop_variant or variant.id_prestashop_variant == 0:
+                _logger.warning(f"Skipped {variant.display_name}: id_prestashop_variant missing")
+                total_failed += 1
+                continue
 
-        # Parse URLs (split by semicolon)
-        image_urls = [url.strip() for url in self.x_studio_image1.split(';') if url.strip()]
+            # Validation 2: Check template PrestaShop ID
+            if not variant.product_tmpl_id.id_prestashop or variant.product_tmpl_id.id_prestashop == 0:
+                _logger.warning(f"Skipped {variant.display_name}: product_tmpl_id.id_prestashop missing")
+                total_failed += 1
+                continue
 
-        if not image_urls:
-            raise UserError("No valid URLs found!")
-        uploaded_image_ids = []
-        uploaded_count = 0
-        failed_count = 0
+            # Validation 3: Check image URLs
+            if not variant.x_studio_image1:
+                _logger.warning(f"Skipped {variant.display_name}: no images in x_studio_image1")
+                total_failed += 1
+                continue
 
-        # Step 1: Upload images to product
-        for idx, image_url in enumerate(image_urls, 1):
-            _logger.info(f"Processing image {idx}/{len(image_urls)}: {image_url}")
+            image_urls = [url.strip() for url in variant.x_studio_image1.split(';') if url.strip()]
+            if not image_urls:
+                _logger.warning(f"Skipped {variant.display_name}: no valid image URLs")
+                total_failed += 1
+                continue
 
-            try:
-                # Download image
-                _logger.info(f"Downloading image from: {image_url}")
-                response = requests.get(image_url, timeout=60)
+            uploaded_image_ids = []
+            uploaded_count = 0
+            failed_count = 0
 
-                if response.status_code != 200:
-                    _logger.error(f"Failed to download: {response.status_code}")
-                    failed_count += 1
-                    continue
+            # Upload images
+            for idx, image_url in enumerate(image_urls, 1):
+                try:
+                    response = requests.get(image_url, timeout=30)
+                    if response.status_code != 200:
+                        _logger.error(f"{variant.display_name}: failed to download {image_url}")
+                        failed_count += 1
+                        continue
 
-                image_data = response.content
-                _logger.info(f"Image downloaded: {len(image_data)} bytes")
-
-                # Upload to PrestaShop product
-                files = {
-                    'image': (f'variant_{self.id_prestashop_variant}_{idx}.jpg', image_data, 'image/jpeg')
-                }
-
-                upload_response = requests.post(
-                    f"https://outletna.com/api/images/products/{self.product_tmpl_id.id_prestashop}",
-                    auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
-                    files=files,
-                    timeout=60
-                )
-
-                if upload_response.status_code in [200, 201]:
-                    root = ET.fromstring(upload_response.content)
-                    image_id = root.find('.//image/id')
-                    if image_id is not None:
-                        image_id_value = int(image_id.text)
-                        uploaded_image_ids.append(image_id_value)
-                        uploaded_count += 1
-                        _logger.info(f"Image uploaded! PrestaShop Image ID: {image_id_value}")
-                else:
-                    _logger.error(f"Upload failed: {upload_response.status_code} - {upload_response.text}")
-                    failed_count += 1
-
-            except Exception as e:
-                _logger.error(f"Error processing image: {str(e)}")
-                failed_count += 1
-
-        # Step 2: Associate images with combination
-        if uploaded_image_ids:
-            _logger.info(
-                f"Associating {len(uploaded_image_ids)} image(s) with combination {self.id_prestashop_variant}")
-
-            try:
-                # Get current combination data
-                get_response = requests.get(
-                    f"https://outletna.com/api/combinations/{self.id_prestashop_variant}",
-                    auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
-                    params={'display': 'full'},
-                    timeout=60
-                )
-
-                if get_response.status_code == 200:
-                    root = ET.fromstring(get_response.content)
-
-                    # Find or create associations element
-                    combination = root.find('.//combination')
-                    associations = combination.find('associations')
-                    if associations is None:
-                        associations = ET.SubElement(combination, 'associations')
-
-                    # Remove old images if exist
-                    old_images = associations.find('images')
-                    if old_images is not None:
-                        associations.remove(old_images)
-
-                    # Add new images
-                    images_elem = ET.SubElement(associations, 'images')
-                    for img_id in uploaded_image_ids:
-                        image_elem = ET.SubElement(images_elem, 'image')
-                        id_elem = ET.SubElement(image_elem, 'id')
-                        id_elem.text = str(img_id)
-
-                    # Update combination
-                    updated_xml = ET.tostring(root, encoding='utf-8', method='xml')
-
-                    update_response = requests.put(
-                        f"https://outletna.com/api/combinations/{self.id_prestashop_variant}",
+                    image_data = response.content
+                    files = {'image': (f'variant_{variant.id_prestashop_variant}_{idx}.jpg', image_data, 'image/jpeg')}
+                    upload_response = requests.post(
+                        f"https://outletna.com/api/images/products/{variant.product_tmpl_id.id_prestashop}",
                         auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
-                        headers={"Content-Type": "application/xml"},
-                        data=updated_xml,
+                        files=files,
                         timeout=60
                     )
 
-                    if update_response.status_code == 200:
-                        _logger.info(f"Images successfully associated with combination!")
+                    if upload_response.status_code in [200, 201]:
+                        root = ET.fromstring(upload_response.content)
+                        image_id_elem = root.find('.//image/id')
+                        if image_id_elem is not None:
+                            image_id = int(image_id_elem.text)
+                            uploaded_image_ids.append(image_id)
+                            uploaded_count += 1
                     else:
-                        _logger.error(f"Failed to associate images: {update_response.text}")
-                        raise UserError(f"Failed to associate images with combination: {update_response.text}")
-                else:
-                    raise UserError(f"Failed to get combination data: {get_response.status_code}")
+                        _logger.error(f"{variant.display_name}: upload failed {upload_response.status_code}")
+                        failed_count += 1
+                except Exception as e:
+                    _logger.error(f"{variant.display_name}: error {str(e)}")
+                    failed_count += 1
 
-            except Exception as e:
-                _logger.error(f"Error associating images: {str(e)}")
-                raise UserError(f"Error associating images with combination: {str(e)}")
+            # Associate images with variant
+            if uploaded_image_ids:
+                try:
+                    get_response = requests.get(
+                        f"https://outletna.com/api/combinations/{variant.id_prestashop_variant}",
+                        auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
+                        params={'display': 'full'},
+                        timeout=30
+                    )
+                    if get_response.status_code == 200:
+                        root = ET.fromstring(get_response.content)
+                        combination = root.find('.//combination')
+                        associations = combination.find('associations')
+                        if associations is None:
+                            associations = ET.SubElement(combination, 'associations')
+                        old_images = associations.find('images')
+                        if old_images is not None:
+                            associations.remove(old_images)
+                        images_elem = ET.SubElement(associations, 'images')
+                        for img_id in uploaded_image_ids:
+                            image_elem = ET.SubElement(images_elem, 'image')
+                            id_elem = ET.SubElement(image_elem, 'id')
+                            id_elem.text = str(img_id)
+                        updated_xml = ET.tostring(root, encoding='utf-8', method='xml')
+                        update_response = requests.put(
+                            f"https://outletna.com/api/combinations/{variant.id_prestashop_variant}",
+                            auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
+                            headers={"Content-Type": "application/xml"},
+                            data=updated_xml,
+                            timeout=30
+                        )
+                        if update_response.status_code == 200:
+                            all_associated_ids.extend(uploaded_image_ids)
+                except Exception as e:
+                    _logger.error(f"{variant.display_name}: failed to associate images: {str(e)}")
 
-        # Show result
-        message = f" Uploaded: {uploaded_count}\n Failed: {failed_count}"
-        if uploaded_image_ids:
-            message += f"\n Associated Image IDs: {', '.join(map(str, uploaded_image_ids))}"
+            total_uploaded += uploaded_count
+            total_failed += failed_count
+
+        message = f"Total Uploaded: {total_uploaded}\n Total Failed: {total_failed}"
+        if all_associated_ids:
+            message += f"\n Associated Image IDs: {', '.join(map(str, all_associated_ids))}"
+
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
                 'title': 'Variant Image Export',
                 'message': message,
-                'type': 'success' if failed_count == 0 else 'warning',
+                'type': 'success' if total_failed == 0 else 'warning',
                 'sticky': True,
             }
         }
+
+    def _job_export_variant_images_batch(self, variant_ids):
+        """Background job to export images for a batch of variants"""
+        variants = self.browse(variant_ids)
+        if not variants:
+            return
+
+        for variant in variants:
+            try:
+                variant.action_export_variant_images()
+            except Exception as e:
+                _logger.error(f"JOB: Failed to export images for {variant.display_name}: {str(e)}")
+
+        _logger.info(f"JOB: Batch completed for {len(variants)} variant(s)")
+
+    def action_export_variant_images_batch(self):
+        """Queue jobs to export variant images for multiple products"""
+        if not self:
+            raise UserError(_("No variant selected."))
+
+        BATCH_SIZE = 20  # Adjust batch size as needed
+        variants_to_export = []
+
+        for variant in self:
+            if not variant.id_prestashop_variant:
+                _logger.warning(f"Skipped {variant.display_name}: no PrestaShop variant ID")
+                continue
+            if not variant.x_studio_image1:
+                _logger.warning(f"Skipped {variant.display_name}: no image URLs")
+                continue
+            variants_to_export.append(variant)
+
+        if not variants_to_export:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'No Variants to Export',
+                    'message': 'No valid variant images found for export.',
+                    'type': 'warning',
+                    'sticky': False,
+                }
+            }
+
+        total_variants = len(variants_to_export)
+        total_batches = (total_variants + BATCH_SIZE - 1) // BATCH_SIZE
+        _logger.info(f"Creating {total_batches} background jobs for {total_variants} variants")
+
+        for i in range(0, total_variants, BATCH_SIZE):
+            batch = variants_to_export[i:i + BATCH_SIZE]
+            batch_ids = [v.id for v in batch]
+            self.with_delay(
+                description=f"Export PrestaShop Variant Images (Batch {(i // BATCH_SIZE) + 1}/{total_batches})"
+            )._job_export_variant_images_batch(batch_ids)
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Export Started!',
+                'message': f'{total_variants} variant(s) queued for image export in {total_batches} batch(es). Check Queue Jobs menu for progress.',
+                'type': 'success',
+                'sticky': True,
+            }
+        }
+
+    def cron_export_variant_images_to_prestashop(self):
+        """Cron job: export variant images automatically in batches"""
+        _logger.info("CRON: Starting automatic variant image export")
+        try:
+            variants_to_export = self.search([
+                ('id_prestashop_variant', '!=', False),
+                ('x_studio_image1', '!=', False)
+            ], limit=100)
+
+            if not variants_to_export:
+                _logger.info("CRON: No variant images to export")
+                return
+
+            _logger.info(f"CRON: Found {len(variants_to_export)} variant(s) for export")
+            variants_to_export.action_export_variant_images_batch()
+            _logger.info("CRON: Queue jobs created successfully")
+
+        except Exception as e:
+            _logger.error(f"CRON ERROR: {str(e)}")
 
     def _delete_combination_from_prestashop(self, id_prestashop_variant):
         """Delete a single combination from PrestaShop by ID"""

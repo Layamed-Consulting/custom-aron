@@ -18,7 +18,7 @@
 
                 <button string="Export image"
                         type="object"
-                        name="action_export_variant_images"
+                        name="action_export_variant_images_batch"
                         class="oe_highlight"/>
             </header>
             <field name="barcode" position="after">
