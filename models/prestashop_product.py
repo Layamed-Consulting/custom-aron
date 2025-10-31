@@ -502,12 +502,12 @@ class ProductProductPrest(models.Model):
                 continue
 
             # Validation 3: Check image URLs
-            if not variant.x_studio_image_1:
-                _logger.warning(f"Skipped {variant.display_name}: no images in x_studio_image_1")
+            if not variant.x_studio_image1:
+                _logger.warning(f"Skipped {variant.display_name}: no images in x_studio_image1")
                 total_failed += 1
                 continue
 
-            image_urls = [url.strip() for url in variant.x_studio_image_1.split(';') if url.strip()]
+            image_urls = [url.strip() for url in variant.x_studio_image1.split(';') if url.strip()]
             if not image_urls:
                 _logger.warning(f"Skipped {variant.display_name}: no valid image URLs")
                 total_failed += 1
@@ -629,7 +629,7 @@ class ProductProductPrest(models.Model):
             if not variant.id_prestashop_variant:
                 _logger.warning(f"Skipped {variant.display_name}: no PrestaShop variant ID")
                 continue
-            if not variant.x_studio_image_1:
+            if not variant.x_studio_image1:
                 _logger.warning(f"Skipped {variant.display_name}: no image URLs")
                 continue
             variants_to_export.append(variant)
@@ -674,7 +674,7 @@ class ProductProductPrest(models.Model):
         try:
             variants_to_export = self.search([
                 ('id_prestashop_variant', '!=', False),
-                ('x_studio_image_1', '!=', False)
+                ('x_studio_image1', '!=', False)
             ], limit=100)
 
             if not variants_to_export:
