@@ -502,12 +502,12 @@ class ProductProductPrest(models.Model):
                 continue
 
             # Validation 3: Check image URLs
-            if not variant.x_studio_image1:
-                _logger.warning(f"Skipped {variant.display_name}: no images in x_studio_image1")
+            if not variant.x_studio_image_1:
+                _logger.warning(f"Skipped {variant.display_name}: no images in x_studio_image_1")
                 total_failed += 1
                 continue
 
-            image_urls = [url.strip() for url in variant.x_studio_image1.split(';') if url.strip()]
+            image_urls = [url.strip() for url in variant.x_studio_image_1.split(';') if url.strip()]
             if not image_urls:
                 _logger.warning(f"Skipped {variant.display_name}: no valid image URLs")
                 total_failed += 1
@@ -629,7 +629,7 @@ class ProductProductPrest(models.Model):
             if not variant.id_prestashop_variant:
                 _logger.warning(f"Skipped {variant.display_name}: no PrestaShop variant ID")
                 continue
-            if not variant.x_studio_image1:
+            if not variant.x_studio_image_1:
                 _logger.warning(f"Skipped {variant.display_name}: no image URLs")
                 continue
             variants_to_export.append(variant)
@@ -674,7 +674,7 @@ class ProductProductPrest(models.Model):
         try:
             variants_to_export = self.search([
                 ('id_prestashop_variant', '!=', False),
-                ('x_studio_image1', '!=', False)
+                ('x_studio_image_1', '!=', False)
             ], limit=100)
 
             if not variants_to_export:
@@ -778,18 +778,16 @@ class ProductProductPrest(models.Model):
         }
 
     def _get_prestashop_attribute_id(self, attribute_name):
-        """Get or create PrestaShop attribute ID by name (Color, Size, etc.)"""
+        """Get PrestaShop attribute ID by name (Color, Size, etc.)"""
         try:
-            # Search for existing attribute
             response = requests.get(
                 "https://outletna.com/api/product_options",
                 auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
                 params={'filter[name]': attribute_name, 'display': 'full'},
-                timeout=300
+                timeout=30
             )
 
             if response.status_code == 200:
-                import xml.etree.ElementTree as ET
                 root = ET.fromstring(response.content)
                 attribute_id = root.find('.//product_option/id')
                 if attribute_id is not None:
@@ -797,7 +795,8 @@ class ProductProductPrest(models.Model):
 
             return None
         except Exception as e:
-            raise UserError(f"Error getting attribute {attribute_name}: {str(e)}")
+            _logger.error(f"Error getting attribute {attribute_name}: {str(e)}")
+            return None
 
     def _get_or_create_prestashop_attribute_value(self, attribute_id, value_name):
         """Get or create PrestaShop attribute value ID"""
@@ -885,6 +884,66 @@ class ProductProductPrest(models.Model):
         except Exception as e:
             raise UserError(f"Error getting category {category_name}: {str(e)}")
 
+    # ==================== HELPER METHODS ====================
+    def _prepare_combination_data(self, variant):
+        """Prepare XML data for a single combination"""
+        try:
+            template = variant.product_tmpl_id
+
+            # Get variant attributes
+            variant_attributes = variant._get_variant_attribute_values()
+
+            if not variant_attributes:
+                return None
+
+            # Get or create attribute values in PrestaShop
+            option_value_ids = []
+            for attr in variant_attributes:
+                ps_attr_id = variant._get_prestashop_attribute_id(attr['prestashop_name'])
+
+                if not ps_attr_id:
+                    _logger.error(f"Attribute '{attr['prestashop_name']}' not found in PrestaShop")
+                    return None
+
+                ps_value_id = variant._get_or_create_prestashop_attribute_value(ps_attr_id, attr['value'])
+
+                if ps_value_id:
+                    option_value_ids.append(ps_value_id)
+
+            if not option_value_ids:
+                return None
+
+            # Build XML with dynamic option values
+            option_values_xml = '\n        '.join([
+                f'<product_option_value><id><![CDATA[{vid}]]></id></product_option_value>'
+                for vid in option_value_ids
+            ])
+
+            # Price difference from base template price
+            price_diff = variant.lst_price - template.list_price
+
+            xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
+<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+  <combination>
+    <id_product><![CDATA[{template.id_prestashop}]]></id_product>
+    <reference><![CDATA[{variant.default_code}]]></reference>
+    <ean13><![CDATA[{variant.default_code}]]></ean13>
+    <price><![CDATA[{price_diff:.2f}]]></price>
+    <minimal_quantity><![CDATA[1]]></minimal_quantity>
+    <associations>
+      <product_option_values>
+        {option_values_xml}
+      </product_option_values>
+    </associations>
+  </combination>
+</prestashop>"""
+
+            return xml_data
+
+        except Exception as e:
+            _logger.error(f"Error preparing data for {variant.display_name}: {str(e)}")
+            return None
+
     def _create_prestashop_category(self, category_name, parent_id=2):
         """Create a new category in PrestaShop"""
         xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -930,10 +989,9 @@ class ProductProductPrest(models.Model):
             value_name = value.name
 
             # Map common Odoo attribute names to PrestaShop
-            # Adjust this mapping based on your attribute names
-            if 'Color' in attribute_name.lower() or 'Color' in attribute_name.lower():
+            if 'color' in attribute_name.lower():
                 prestashop_attr = 'Color'
-            elif 'Size' in attribute_name.lower() or 'Size' in attribute_name.lower():
+            elif 'size' in attribute_name.lower():
                 prestashop_attr = 'Size'
             else:
                 prestashop_attr = attribute_name
@@ -1032,212 +1090,158 @@ class ProductProductPrest(models.Model):
             return None
 
     def action_export_combination_to_prestashop(self):
-        """Export product variant (combination) to PrestaShop"""
-        self.ensure_one()
+        """Export product variants (combinations) in background using queue jobs"""
+        if not self:
+            raise UserError("No variant selected.")
 
-        template = self.product_tmpl_id
+        BATCH_SIZE = 30  # Variants per job
 
-        if not template.id_prestashop:
-            raise UserError("PrestaShop Product ID is missing on the template!")
+        # Filter variants that need export
+        variants_to_export = []
+        skipped_count = 0
 
-        if not self.default_code:
-            raise UserError("Reference / EAN (default_code) is required!")
+        for variant in self:
+            # Skip if already exported
+            if variant.id_prestashop_variant and variant.id_prestashop_variant != 0:
+                skipped_count += 1
+                _logger.info(f"Skipped: {variant.display_name} (already exported)")
+                continue
 
-        # Get variant attributes
-        variant_attributes = self._get_variant_attribute_values()
+            # Skip if missing template PrestaShop ID
+            if not variant.product_tmpl_id.id_prestashop:
+                _logger.warning(f"Skipped: {variant.display_name} (missing template id_prestashop)")
+                skipped_count += 1
+                continue
 
-        if not variant_attributes:
-            raise UserError("No attributes found on this variant!")
+            # Skip if missing reference
+            if not variant.default_code:
+                _logger.warning(f"Skipped: {variant.display_name} (missing reference)")
+                skipped_count += 1
+                continue
 
-        # Get or create attribute values in PrestaShop
-        option_value_ids = []
-        for attr in variant_attributes:
-            # Get PrestaShop attribute ID
-            ps_attr_id = self._get_prestashop_attribute_id(attr['prestashop_name'])
+            # Skip if no attributes
+            if not variant.product_template_attribute_value_ids:
+                _logger.warning(f"Skipped: {variant.display_name} (no attributes)")
+                skipped_count += 1
+                continue
 
-            if not ps_attr_id:
-                raise UserError(
-                    f"Attribute '{attr['prestashop_name']}' not found in PrestaShop. Please create it first.")
+            variants_to_export.append(variant)
 
-            # Get or create value
-            ps_value_id = self._get_or_create_prestashop_attribute_value(ps_attr_id, attr['value'])
-
-            if ps_value_id:
-                option_value_ids.append(ps_value_id)
-
-        # Build XML with dynamic option values
-        option_values_xml = '\n        '.join([
-            f'<product_option_value><id><![CDATA[{vid}]]></id></product_option_value>'
-            for vid in option_value_ids
-        ])
-
-        # Optional: price difference from base template price
-        price_diff = self.lst_price - template.list_price
-
-        xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
-<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
-  <combination>
-    <id_product><![CDATA[{template.id_prestashop}]]></id_product>
-    <reference><![CDATA[{self.default_code}]]></reference>
-    <ean13><![CDATA[{self.default_code}]]></ean13>
-    <price><![CDATA[{price_diff:.2f}]]></price>
-    <minimal_quantity><![CDATA[1]]></minimal_quantity>
-    <associations>
-      <product_option_values>
-        {option_values_xml}
-      </product_option_values>
-    </associations>
-  </combination>
-</prestashop>"""
-
-        try:
-            response = requests.post(
-                "https://outletna.com/api/combinations",
-                auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
-                headers={"Content-Type": "application/xml"},
-                data=xml_data.encode('utf-8'),
-                timeout=300
-            )
-
-            if response.status_code in [200, 201]:
-                # Extract PrestaShop combination ID from response
-                import xml.etree.ElementTree as ET
-                root = ET.fromstring(response.content)
-                prestashop_variant_id = root.find('.//combination/id')
-                if prestashop_variant_id is not None:
-                    self.id_prestashop_variant = int(prestashop_variant_id.text)
-
-                # Update product categories (only once per product)
-                category_ids = self._update_product_categories(template.id_prestashop)
-                category_info = f"<br/>Categories: {', '.join([str(c) for c in category_ids])}" if category_ids else ""
-
-                # Build attributes string
-                attributes_str = ', '.join([f"{a['prestashop_name']}: {a['value']}" for a in variant_attributes])
-
-                return {
-                    'type': 'ir.actions.client',
-                    'tag': 'display_notification',
-                    'params': {
-                        'title': 'Success!',
-                        'message': 'Combination created successfully in PrestaShop!',
-                        'type': 'success',
-                    }
+        if not variants_to_export:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'No Variants to Export',
+                    'message': f'{skipped_count} variants skipped.',
+                    'type': 'warning',
+                    'sticky': False,
                 }
-
-            else:
-                raise UserError(f"Failed to create combination: {response.status_code}\n{response.text}")
-
-        except Exception as e:
-            raise UserError(f"Error while creating combination: {str(e)}")
-
-    def action_export_to_prestashop_combin(self):
-        """Export one or multiple products to PrestaShop"""
-        products = self.filtered(lambda p: not p.id_prestashop_variant)
-        if not products:
-            raise UserError("Tous les produits sélectionnés sont déjà exportés vers PrestaShop.")
-
-        success_count = 0
-        failed = []
-
-        for product in products:
-            try:
-                # Export each combination (existing method)
-                product.action_export_combination_to_prestashop()
-                success_count += 1
-
-            except Exception as e:
-                # Log errors but continue with others
-                failed.append(f"{product.display_name}: {str(e)}")
-                continue
-
-        # Build result message
-        msg = f"{success_count} produits exportés avec succès."
-        if failed:
-            msg += f"\n {len(failed)} échecs :\n" + "\n".join(failed[:10])
-            if len(failed) > 10:
-                msg += "\n..."
-
-        # Send notification to user
-        return {
-            'type': 'ir.actions.client',
-            'tag': 'display_notification',
-            'params': {
-                'title': 'Exportation PrestaShop terminée',
-                'message': msg,
-                'type': 'success' if success_count else 'warning',
-                'sticky': True,
             }
-        }
 
-    def job_export_combination(self):
-        """Queue Job: Export this variant to PrestaShop"""
-        self.ensure_one()
-        self.action_export_combination_to_prestashop()
-        return True
-    # ----------------------------
-    # EXPORT WRAPPER FOR MULTIPLE PRODUCTS
-    # ----------------------------
-    def action_export_to_prestashop_combin_queue(self):
-        """Export multiple variants using Queue Job"""
-        products = self.filtered(lambda p: not p.id_prestashop_variant)
-        if not products:
-            raise UserError("Tous les produits sélectionnés sont déjà exportés vers PrestaShop.")
+        # Create background jobs for each batch
+        total_variants = len(variants_to_export)
+        total_batches = (total_variants + BATCH_SIZE - 1) // BATCH_SIZE
 
-        success_count = 0
-        failed = []
+        _logger.info(f"Creating {total_batches} background jobs for {total_variants} variants")
 
-        for product in products:
-            try:
-                product.with_delay().job_export_combination()  # Queue Job
-                success_count += 1
-            except Exception as e:
-                failed.append(f"{product.display_name}: {str(e)}")
-                continue
+        for i in range(0, total_variants, BATCH_SIZE):
+            batch = variants_to_export[i:i + BATCH_SIZE]
+            batch_ids = [v.id for v in batch]
 
-        msg = f"{success_count} produits mis en file d'attente pour export."
-        if failed:
-            msg += f"\n {len(failed)} échecs :\n" + "\n".join(failed[:10])
-            if len(failed) > 10:
-                msg += "\n..."
+            # Create a background job for this batch
+            self.with_delay(
+                description=f"Export PrestaShop Combinations (Batch {(i // BATCH_SIZE) + 1}/{total_batches})"
+            )._job_export_combinations_batch(batch_ids)
+
+        _logger.info(f"Created {total_batches} background jobs")
 
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
-                'title': 'Exportation PrestaShop (file d’attente)',
-                'message': msg,
-                'type': 'success' if success_count else 'warning',
+                'title': 'Export Started!',
+                'message': f'{total_variants} variants queued for export in {total_batches} batch(es). Check Queue Jobs menu for progress.',
+                'type': 'success',
                 'sticky': True,
             }
         }
 
-    # ----------------------------
-    # CRON FOR AUTOMATIC EXPORT
-    # ----------------------------
-    @api.model
-    def cron_export_new_combinations_to_prestashop(self):
-        """Cron job: export variants not yet exported"""
-        _logger.info("CRON: Starting automatic PrestaShop variant export")
+    def _job_export_combinations_batch(self, variant_ids):
+        """Background job to export a batch of combinations"""
+        variants = self.browse(variant_ids)
+
+        if not variants:
+            return
+
+        _logger.info(f"JOB: Exporting batch of {len(variants)} combinations...")
+
+        success_count = 0
+        failed_count = 0
+
+        for variant in variants:
+            try:
+                # Prepare combination data
+                combination_data = self._prepare_combination_data(variant)
+
+                if not combination_data:
+                    _logger.warning(f"JOB: Skipped {variant.display_name} - no valid data")
+                    failed_count += 1
+                    continue
+
+                # Create combination in PrestaShop
+                response = requests.post(
+                    "https://outletna.com/api/combinations",
+                    auth=("86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N", ""),
+                    headers={"Content-Type": "application/xml"},
+                    data=combination_data.encode('utf-8'),
+                    timeout=60
+                )
+
+                if response.status_code in [200, 201]:
+                    root = ET.fromstring(response.content)
+                    prestashop_variant_id = root.find('.//combination/id')
+
+                    if prestashop_variant_id is not None:
+                        variant.id_prestashop_variant = int(prestashop_variant_id.text)
+                        success_count += 1
+                        _logger.info(f"JOB: Exported {variant.display_name} (ID: {prestashop_variant_id.text})")
+                    else:
+                        failed_count += 1
+                        _logger.error(f"JOB: No ID in response for {variant.display_name}")
+                else:
+                    failed_count += 1
+                    _logger.error(f"JOB: Failed {variant.display_name}: {response.status_code} - {response.text}")
+
+            except Exception as e:
+                failed_count += 1
+                _logger.error(f"JOB: Exception for {variant.display_name}: {str(e)}")
+
+        _logger.info(f"JOB: Batch completed - Success: {success_count}, Failed: {failed_count}")
+
+    def cron_export_combinations_to_prestashop(self):
+        """Cron job: Export new combinations using queue jobs"""
+        _logger.info("CRON: Starting automatic combination export")
         try:
-            products_to_export = self.search([
+            # Find variants that need to be exported
+            variants_to_export = self.search([
                 '|',
                 ('id_prestashop_variant', '=', False),
                 ('id_prestashop_variant', '=', 0),
+                ('product_tmpl_id.id_prestashop', '!=', False),
                 ('default_code', '!=', False),
-                ('product_tmpl_id.id_prestashop', '!=', False)
-            ])
-            if not products_to_export:
-                _logger.info(" CRON: No new variants to export")
+            ], limit=100)
+
+            if not variants_to_export:
+                _logger.info("CRON: No new combinations to export")
                 return
 
-            _logger.info(f" CRON: Found {len(products_to_export)} variant(s) to export")
-            for product in products_to_export:
-                product.with_delay().job_export_combination()
-
-            _logger.info("CRON: Variants queued successfully")
+            _logger.info(f"CRON: Found {len(variants_to_export)} combination(s) to export")
+            variants_to_export.action_export_combination_to_prestashop()
+            _logger.info("CRON: Jobs created successfully")
 
         except Exception as e:
-            _logger.error(f" CRON ERROR: {str(e)}", exc_info=True)
+            _logger.error(f"CRON ERROR: {str(e)}")
 
 class WebsiteOrder(models.Model):
     _name = 'stock.website.order'

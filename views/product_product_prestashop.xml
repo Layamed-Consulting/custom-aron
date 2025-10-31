@@ -5,7 +5,7 @@
         <field name="inherit_id" ref="product.product_product_tree_view"/>
         <field name="arch" type="xml">
             <header position="inside">
-                <button name="action_export_to_prestashop_combin"
+                <button name="action_export_combination_to_prestashop"
                         string="Export to PrestaShop"
                         type="object"
                         class="oe_highlight"/>
