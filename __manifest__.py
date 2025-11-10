@@ -21,6 +21,7 @@
         'data/cron.xml',
         'data/fetch.xml',
         'data/cron_variante.xml',
+        'data/update_stock.xml',
     ],
     'installable': True,
     'application': True,
