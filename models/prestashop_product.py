@@ -1,7 +1,9 @@
 from odoo import models, fields, api,_
 from odoo.exceptions import UserError
 import requests
+import base64
 from datetime import datetime, timedelta
+import time
 import json
 import xml.etree.ElementTree as ET
 import logging
@@ -1242,6 +1244,372 @@ class ProductProductPrest(models.Model):
 
         except Exception as e:
             _logger.error(f"CRON ERROR: {str(e)}")
+    '''Stock update'''
+
+    @api.model
+    def cron_monitor_stock_changes(self):
+        """
+        Cron job function that runs every 5 minutes to monitor stock changes
+        This is the main entry point for the scheduled action
+        """
+        try:
+            _logger.info("CRON: Starting stock change monitor")
+
+            # Monitor stock move lines in the last 10 minutes
+            affected_products = self.get_products_from_stock_move_lines(minutes_ago=10)
+
+            if affected_products:
+                _logger.info(f"CRON: Found {len(affected_products)} affected products, creating queue jobs")
+
+                # Create background jobs for stock sync
+                self._create_stock_sync_jobs(affected_products)
+            else:
+                _logger.info("CRON: No products affected by stock moves in the last 10 minutes")
+
+        except Exception as e:
+            _logger.error(f"CRON: Error in stock change monitor: {e}")
+
+        _logger.info("=== CRON: Stock Change Monitor Completed ===")
+        return True
+
+    # ==================== JOB CREATION ====================
+    @api.model
+    def _create_stock_sync_jobs(self, affected_products):
+        """Create queue jobs for stock synchronization in batches"""
+        BATCH_SIZE = 30  # Products per job
+
+        total_products = len(affected_products)
+        total_batches = (total_products + BATCH_SIZE - 1) // BATCH_SIZE
+
+        _logger.info(f"Creating {total_batches} background jobs for {total_products} products")
+
+        for i in range(0, total_products, BATCH_SIZE):
+            batch = affected_products[i:i + BATCH_SIZE]
+
+            # Create a background job for this batch
+            self.with_delay(
+                description=f"Sync PrestaShop Stock (Batch {(i // BATCH_SIZE) + 1}/{total_batches})"
+            )._job_sync_stock_batch(batch)
+
+        _logger.info(f"Created {total_batches} stock sync jobs")
+
+    # ==================== BACKGROUND JOB METHOD ====================
+    @api.model
+    def _job_sync_stock_batch(self, products_batch):
+        """Background job to sync stock for a batch of products"""
+        if not products_batch:
+            return
+
+        _logger.info(f"JOB: Starting stock sync for batch of {len(products_batch)} products")
+
+        BASE_URL = "https://outletna.com/api"
+        WS_KEY = "86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N"
+
+        # Create basic auth header
+        auth_string = f"{WS_KEY}:"
+        auth_bytes = auth_string.encode('ascii')
+        auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+        headers = {
+            'Authorization': f'Basic {auth_b64}',
+            'Content-Type': 'application/xml'
+        }
+
+        sync_success = 0
+        sync_failed = 0
+
+        for product_info in products_batch:
+            try:
+                ean13 = product_info['ean13']
+                new_qty = product_info['qty_available']
+                product_name = product_info['name']
+
+                _logger.info(f"JOB: Processing {product_name} (EAN13: {ean13}) - Stock: {new_qty}")
+
+                # Search and update combination stock
+                success = self._search_and_update_combination_stock(
+                    ean13, new_qty, BASE_URL, headers
+                )
+
+                if success:
+                    sync_success += 1
+                    _logger.info(f"JOB: ✔ Successfully synced {product_name}")
+                else:
+                    sync_failed += 1
+                    _logger.warning(f"JOB: ✘ Failed to sync {product_name}")
+
+                # Small delay between products
+                time.sleep(0.2)
+
+            except Exception as e:
+                sync_failed += 1
+                _logger.error(f"JOB: Error processing {product_info.get('ean13', 'unknown')}: {e}")
+
+        _logger.info(f"JOB: Batch completed - Success: {sync_success}, Failed: {sync_failed}")
+
+    # ==================== HELPER METHODS ====================
+    @api.model
+    def _search_and_update_combination_stock(self, ean13, new_quantity, base_url, headers):
+        """Search for combination by EAN13 and update its stock directly"""
+        try:
+            # Step 1: Search for combinations by EAN13
+            search_url = f"{base_url}/combinations?filter[ean13]={ean13}&display=full"
+            _logger.info(f"Searching combinations: {search_url}")
+
+            combinations_root = self._get_xml(search_url, headers)
+            if combinations_root is None:
+                _logger.warning(f"Failed to get combinations response for EAN13 {ean13}")
+                return False
+
+            # Check if any combinations were found
+            combinations = combinations_root.findall('.//combination')
+            if not combinations:
+                _logger.warning(f"No combinations found for EAN13 {ean13}")
+                return False
+
+            # Get the first combination
+            combination = combinations[0]
+
+            # Extract the combination ID
+            combination_id_elem = combination.find('.//id')
+            if combination_id_elem is None:
+                _logger.warning(f"No combination ID found for EAN13 {ean13}")
+                return False
+
+            combination_id = combination_id_elem.text.strip()
+
+            # Step 2: Get stock_available by combination ID
+            stock_search_url = f"{base_url}/stock_availables?filter[id_product_attribute]={combination_id}&display=full"
+            stock_root = self._get_xml(stock_search_url, headers)
+
+            if stock_root is None:
+                _logger.warning(f"Failed to get stock_availables for combination ID {combination_id}")
+                return False
+
+            # Find stock_available elements
+            stock_availables = stock_root.findall('.//stock_available')
+            if not stock_availables:
+                _logger.warning(f"No stock_availables found for combination ID {combination_id}")
+                return False
+
+            updated_count = 0
+
+            # Step 3: Update each stock_available
+            for stock_available_elem in stock_availables:
+                stock_id_elem = stock_available_elem.find('.//id')
+                if stock_id_elem is None:
+                    continue
+
+                stock_id = stock_id_elem.text.strip()
+
+                # Get current quantity for logging
+                current_qty_elem = stock_available_elem.find('.//quantity')
+                old_qty = current_qty_elem.text if current_qty_elem is not None else "unknown"
+
+                _logger.info(f"Updating stock_available ID {stock_id} for combination {combination_id}")
+
+                # Get the full stock_available details for update
+                stock_detail_url = f"{base_url}/stock_availables/{stock_id}"
+                stock_detail = self._get_xml(stock_detail_url, headers)
+
+                if stock_detail is None:
+                    _logger.warning(f"Failed to get stock_available details for ID {stock_id}")
+                    continue
+
+                stock_available_node = stock_detail.find('stock_available')
+                if stock_available_node is None:
+                    continue
+
+                # Update quantity
+                quantity_node = stock_available_node.find('quantity')
+                if quantity_node is not None:
+                    quantity_node.text = str(int(new_quantity))
+
+                    # Prepare update XML
+                    updated_doc = ET.Element('prestashop', xmlns_xlink="http://www.w3.org/1999/xlink")
+                    updated_doc.append(stock_available_node)
+                    updated_data = ET.tostring(updated_doc, encoding='utf-8', xml_declaration=True)
+
+                    # Send update
+                    response = self._put_xml(stock_detail_url, updated_data, headers)
+
+                    if response and response.status_code in (200, 201):
+                        _logger.info(
+                            f"✔ PRESTASHOP SYNC: Updated stock_available {stock_id} for EAN13 {ean13} "
+                            f"(combination {combination_id}): {old_qty} → {int(new_quantity)}"
+                        )
+                        updated_count += 1
+                    else:
+                        _logger.warning(f"Failed to update stock_available {stock_id}")
+
+                # Small delay between updates
+                time.sleep(0.1)
+
+            return updated_count > 0
+
+        except Exception as e:
+            _logger.error(f"Error processing combination for EAN13 {ean13}: {e}")
+            return False
+
+    @api.model
+    def _get_xml(self, url, headers):
+        """Helper method to GET XML from PrestaShop"""
+        try:
+            resp = requests.get(url, headers=headers, timeout=60)
+            if resp.status_code != 200:
+                _logger.warning(f"GET failed: {url} | Status: {resp.status_code}")
+                return None
+            return ET.fromstring(resp.content)
+        except Exception as e:
+            _logger.warning(f"Exception during GET: {url} | Error: {e}")
+            return None
+
+    @api.model
+    def _put_xml(self, url, data, headers):
+        """Helper method to PUT XML to PrestaShop"""
+        try:
+            resp = requests.put(url, data=data, headers=headers, timeout=30)
+            if resp.status_code not in (200, 201):
+                _logger.warning(f"PUT failed: {url} | Status: {resp.status_code}")
+                return None
+            return resp
+        except Exception as e:
+            _logger.warning(f"Exception during PUT: {url} | Error: {e}")
+            return None
+
+    # ==================== STOCK MONITORING ====================
+    @api.model
+    def get_products_from_stock_move_lines(self, minutes_ago=10):
+        """
+        Get products affected by stock move lines in the last X minutes
+        Returns list of products with their current stock quantities
+        """
+        # Calculate the time threshold
+        time_threshold = datetime.now() - timedelta(minutes=minutes_ago)
+
+        # Search for stock move lines that were updated in the last X minutes
+        recent_move_lines = self.env['stock.move.line'].search([
+            '|',
+            ('create_date', '>=', time_threshold),
+            ('write_date', '>=', time_threshold),
+            ('product_id.default_code', '!=', False),
+            ('product_id.default_code', '!=', ''),
+            ('state', '=', 'done'),
+        ], order='write_date desc')
+
+        if not recent_move_lines:
+            _logger.info("No stock move lines found in the specified time period")
+            return []
+
+        # Get unique products from the move lines
+        product_ids = set()
+        for move_line in recent_move_lines:
+            product_ids.add(move_line.product_id.id)
+
+        # Get current stock quantities for these products
+        affected_products = []
+        for product_id in product_ids:
+            product = self.env['product.product'].browse(product_id)
+            if product and product.default_code:
+                affected_products.append({
+                    'id': product.id,
+                    'name': product.name,
+                    'ean13': product.default_code,
+                    'qty_available': product.qty_available,
+                    'write_date': product.write_date
+                })
+                _logger.info(
+                    f"Product affected: {product.name} (EAN13: {product.default_code}) - "
+                    f"Current Stock: {product.qty_available}"
+                )
+
+        _logger.info(f"=== Found {len(affected_products)} products to sync ===")
+        return affected_products
+
+    # ==================== UTILITY METHODS ====================
+    @api.model
+    def log_stock_move_lines_for_product(self, ean13, minutes_ago=10):
+        """Log stock move lines for a specific product by EAN13"""
+        time_threshold = datetime.now() - timedelta(minutes=minutes_ago)
+
+        # Find the product
+        product = self.env['product.product'].search([
+            ('default_code', '=', ean13)
+        ], limit=1)
+
+        if not product:
+            _logger.info(f"Product with EAN13 {ean13} not found")
+            return False
+
+        # Check recent move lines for this product
+        recent_move_lines = self.env['stock.move.line'].search([
+            ('product_id', '=', product.id),
+            '|',
+            ('create_date', '>=', time_threshold),
+            ('write_date', '>=', time_threshold),
+        ], order='write_date desc')
+
+        if recent_move_lines:
+            _logger.info(f"Recent move lines for {product.name} (EAN13: {ean13}):")
+            for move_line in recent_move_lines:
+                _logger.info(
+                    f"  - Qty: {move_line.qty_done} | "
+                    f"{move_line.location_id.name} → {move_line.location_dest_id.name}"
+                )
+                _logger.info(f"    Date: {move_line.write_date} | State: {move_line.state}")
+        else:
+            _logger.info("No recent move lines found for this product")
+
+        return True
+
+    # ==================== MANUAL SYNC ACTION ====================
+    def action_sync_stock_to_prestashop(self):
+        """Manual action to sync selected products' stock to PrestaShop"""
+        if not self:
+            raise UserError("No product selected.")
+
+        # Filter products with EAN13
+        products_to_sync = []
+        skipped_count = 0
+
+        for product in self:
+            if not product.default_code:
+                skipped_count += 1
+                _logger.warning(f"Skipped: {product.display_name} (missing EAN13)")
+                continue
+
+            products_to_sync.append({
+                'id': product.id,
+                'name': product.name,
+                'ean13': product.default_code,
+                'qty_available': product.qty_available,
+                'write_date': product.write_date
+            })
+
+        if not products_to_sync:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'No Products to Sync',
+                    'message': f'{skipped_count} products skipped (missing EAN13).',
+                    'type': 'warning',
+                    'sticky': False,
+                }
+            }
+
+        # Create queue jobs
+        self._create_stock_sync_jobs(products_to_sync)
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Stock Sync Started!',
+                'message': f'{len(products_to_sync)} products queued for stock sync. Check Queue Jobs menu for progress.',
+                'type': 'success',
+                'sticky': True,
+            }
+        }
 
 class WebsiteOrder(models.Model):
     _name = 'stock.website.order'
