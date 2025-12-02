@@ -5,23 +5,33 @@
         <field name="model">stock.website.order</field>
         <field name="arch" type="xml">
             <tree string="Commandes du site">
+                <header>
+                    <button string="Sale Order Create"
+                            type="object"
+                            name="action_create_batch_sale_orders_dynamic"
+                            class="btn-primary"/>
+                </header>
                 <field name="ticket_id"/>
                 <field name="reference"/>
                 <field name="date_commande"/>
                 <field name="client_name"/>
                 <field name="payment_method"/>
+                <field name="total_qty"/>
+                <field name="batch_number"/>
+                <field name="sale_order_ref" string="Ref. Bon de Commande"/>
                 <field name="status"
                        widget="badge"
-                       decoration-info="status == 'initial'"
+                       decoration-info="status == 'en_cours_traitement'"
                        decoration-warning="status == 'en_cours_preparation'"
-                       decoration-success="status == 'prepare'"
-                       decoration-bf="status == 'encourdelivraison'"
+                       decoration-success="status == 'commande_prepare'"
+                       decoration-bf="status == 'delivered'"
                        decoration-danger="status == 'annuler'"
                 />
             </tree>
         </field>
     </record>
-    <!-- Form View with Order Lines -->
+
+    <!-- Form View with Order Lines
     <record id="view_stock_website_order_form" model="ir.ui.view">
         <field name="name">stock.website.order.form</field>
         <field name="model">stock.website.order</field>
@@ -32,6 +42,7 @@
                         <field name="status"/>
                         <field name="reference"/>
                         <field name="date_commande"/>
+                        <field name="batch_number"/>
                     </group>
                     <group string="Détails du Client" colspan="2">
                         <group>
@@ -43,28 +54,21 @@
                             <field name="adresse"/>
                             <field name="second_adresse"/>
                             <field name="postcode"/>
-                            <!-- <field name="pays"/> -->
                             <field name="city"/>
                         </group>
                     </group>
                     <notebook>
                         <page string="Ligne de commande">
                             <field name="line_ids">
-                                    <tree editable="false" class="oe_order_line_table">
-                                        <field name="product_id"/>
-                                        <field name="code_barre" readonly="1"/>
-                                        <!--
-                                        <field name="magasin_name" readonly="1"/>-->
-                                        <field name="stock_count" readonly="1"/>
-                                        <!--
-                                        <field name="numero_recu" readonly="1"/>-->
-                                        <field name="product_name"/>
-                                        <field name="quantity"/>
-                                        <field name="price"/>
-                                        <!--
-                                        <field name="discount"/>-->
-                                        <field name="status_ligne_commande"/>
-                                    </tree>
+                                <tree editable="false" class="oe_order_line_table">
+                                    <field name="product_id"/>
+                                    <field name="code_barre" readonly="1"/>
+                                    <field name="stock_count" readonly="1"/>
+                                    <field name="product_name"/>
+                                    <field name="quantity"/>
+                                    <field name="price"/>
+                                    <field name="status_ligne_commande"/>
+                                </tree>
                             </field>
                         </page>
                     </notebook>
@@ -73,11 +77,124 @@
                     <field name="message_follower_ids" widget="mail_followers"/>
                     <field name="message_ids" widget="mail_thread"/>
                 </div>
-
             </form>
         </field>
-    </record>
-    <!-- search bat -->
+    </record>-->
+    <record id="view_stock_website_order_form" model="ir.ui.view">
+    <field name="name">stock.website.order.form</field>
+    <field name="model">stock.website.order</field>
+    <field name="arch" type="xml">
+        <form string="Commandes Prestashop">
+            <header>
+                <!-- Button to create shipment - only visible when status is "commande_prepare" and shipment not created -->
+                <button name="action_create_shipment"
+                        string="Create Shipment"
+                        type="object"
+                        class="btn-success"
+                        invisible="status != 'commande_prepare' or shipment_created"/>
+
+                <!-- Button to print label - only visible when shipment is created -->
+                <button name="action_print_label"
+                        string="Print Label"
+                        type="object"
+                        class="btn-info"
+                        invisible="not shipment_created"
+                        icon="fa-print"/>
+
+                <!--
+                <field name="status" widget="statusbar"
+                       statusbar_visible="en_cours_traitement,en_cours_preparation,commande_prepare,delivered"/>
+                       -->
+            </header>
+            <sheet>
+                <div class="oe_button_box" name="button_box">
+                    <!-- Optional: Add smart button to show shipment info -->
+                    <button class="oe_stat_button"
+                            type="object"
+                            name="action_open_tracking"
+                            icon="fa-truck"
+                            invisible="not shipment_created">
+                        <div class="o_field_widget o_stat_info">
+                            <span class="o_stat_text">Tracking Shipment</span>
+                            <span class="o_stat_value">
+                                <field name="shipment_number"/>
+                            </span>
+                        </div>
+                    </button>
+                </div>
+                <group>
+                    <group>
+                        <field name="status"/>
+                        <field name="reference"/>
+                        <field name="date_commande"/>
+                        <field name="batch_number"/>
+                    </group>
+                    <group>
+                        <field name="shipment_created" invisible="1"/>
+                        <field name="shipment_number" readonly="1" invisible="not shipment_created"/>
+                        <field name="label_url" invisible="1"/>
+                    </group>
+                </group>
+
+                <group string="Détails du Client" colspan="2">
+                    <group>
+                        <field name="client_name"/>
+                        <field name="email"/>
+                        <field name="phone"/>
+                        <field name="mobile"/>
+                    </group>
+                    <group>
+                        <field name="adresse"/>
+                        <field name="second_adresse"/>
+                        <field name="postcode"/>
+                        <field name="city"/>
+                        <field name="pays"/>
+                    </group>
+                </group>
+
+                <notebook>
+                    <page string="Ligne de commande">
+                        <field name="line_ids">
+                            <tree editable="false" class="oe_order_line_table">
+                                <field name="product_id"/>
+                                <field name="code_barre" readonly="1"/>
+                                <field name="stock_count" readonly="1"/>
+                                <field name="product_name"/>
+                                <field name="quantity"/>
+                                <field name="price"/>
+                                <field name="status_ligne_commande"/>
+                            </tree>
+                        </field>
+                        <group class="oe_subtotal_footer oe_right">
+                            <field name="total_qty" readonly="1"/>
+                        </group>
+                    </page>
+
+                    <page string="Informations Livraison" invisible="not shipment_created">
+                        <group>
+                            <group string="Détails du Colis">
+                                <field name="shipment_number" readonly="1"/>
+                                <!-- <field name="label_url" readonly="1" widget="url"/> -->
+                            </group>
+                            <!--
+                            <group string="Actions">
+                                <button name="action_print_label"
+                                        string="Ouvrir Étiquette"
+                                        type="object"
+                                        class="btn-primary"
+                                        icon="fa-external-link"/>
+                            </group>-->
+                        </group>
+                    </page>
+                </notebook>
+            </sheet>
+            <div class="oe_chatter">
+                <field name="message_follower_ids" widget="mail_followers"/>
+                <field name="message_ids" widget="mail_thread"/>
+            </div>
+        </form>
+    </field>
+</record>
     <!-- Action and Menu -->
     <record id="action_stock_website_order" model="ir.actions.act_window">
         <field name="name">Commandes du site</field>
@@ -85,7 +202,7 @@
         <field name="view_mode">tree,form</field>
         <field name="context">{}</field>
     </record>
-    <menuitem id="menu_stock_website_root" name="Prestashop" parent="sale.sale_menu_root"/>
 
+    <menuitem id="menu_stock_website_root" name="Prestashop" parent="sale.sale_menu_root"/>
     <menuitem id="menu_stock_website_order" name="Commandes Recu" parent="menu_stock_website_root" action="action_stock_website_order"/>
 </odoo>
