@@ -1630,49 +1630,534 @@ class WebsiteOrder(models.Model):
     second_adresse = fields.Char(string="Adresse 2")
     city = fields.Char(string="Ville")
     postcode = fields.Char(string="Postcode")
-    pays= fields.Char(string="Pays")
+    pays = fields.Char(string="Pays")
     status = fields.Selection([
-        ('initial', 'Initial'),
-        ('prepare', 'Préparé'),
-        ('delivered', 'Livré'),
+        ('en_cours_traitement', 'En cours de traitement'),
         ('en_cours_preparation', 'En cours de préparation'),
-        ('encourdelivraison', 'En cours de Livraison'),
+        ('commande_prepare', 'Commande préparée'),
+        ('delivered', 'Livré'),
         ('annuler', 'Annulé'),
-    ], string="Statut", default='initial')
+    ], string="Statut", default='en_cours_traitement', tracking=True)
 
-    def action_create_sale_order(self):
-        """Create sale order from website order (simple version by client_name)"""
+    batch_number = fields.Char(
+        string="Numéro de Batch",
+        readonly=True,
+        help="Numéro de lot pour grouper les commandes (ex: S000001)"
+    )
+
+    total_qty = fields.Float(
+        string="Quantité Totale",
+        compute="_compute_total_qty",
+        store=True
+    )
+
+    # Shipment fields
+    shipment_number = fields.Char(
+        string="Numéro de Colis",
+        readonly=True,
+        tracking=True,
+        help="Numéro de suivi du colis"
+    )
+
+    label_url = fields.Char(
+        string="URL Étiquette",
+        readonly=True,
+        help="URL pour imprimer l'étiquette du colis"
+    )
+
+    shipment_created = fields.Boolean(
+        string="Colis Créé",
+        default=False,
+        readonly=True
+    )
+    sale_order_id = fields.Many2one(
+        'sale.order',
+        string="Bon de Commande",
+        readonly=True,
+        ondelete='set null',
+        help="Bon de commande lié à cette commande website"
+    )
+    # Champ texte pour afficher la référence en lecture (safe)
+    sale_order_ref = fields.Char(
+        string="Ref. Bon de Commande",
+        readonly=True,
+        help="Nom / référence du bon de commande (copie textuelle pour affichage sécurisé)"
+    )
+
+    @api.depends('line_ids.quantity')
+    def _compute_total_qty(self):
+        """Calculate total quantity of all lines"""
         for order in self:
-            # Chercher le client par nom
+            order.total_qty = sum(order.line_ids.mapped('quantity'))
+
+    def _get_next_batch_number(self):
+        """Generate next batch number (S000001, S000002, etc.)"""
+        last_batch = self.search([('batch_number', '!=', False)], order='batch_number desc', limit=1)
+        if not last_batch or not last_batch.batch_number:
+            return 'S000001'
+        try:
+            last_number = int(last_batch.batch_number[1:])
+            return f'S{last_number + 1:06d}'
+        except:
+            return 'S000001'
+
+    def action_create_shipment(self):
+        """Create shipment via PostShipping API"""
+        self.ensure_one()
+
+        if self.status != 'commande_prepare':
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Erreur',
+                    'message': 'Le colis ne peut être créé que pour les commandes avec le statut "Commande préparée".',
+                    'type': 'warning'
+                }
+            }
+
+        if self.shipment_created:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Info',
+                    'message': f'Un colis a déjà été créé pour cette commande (N°: {self.shipment_number}).',
+                    'type': 'info'
+                }
+            }
+
+        # Prepare API request
+        url = "https://api.postshipping.com/api2/shipments"
+        headers = {
+            'Content-Type': 'application/json',
+            'Token': '45E6880FBAD104CFA6BBCF9407154187'
+        }
+
+        # Calculate total weight (1kg per item as default)
+        total_weight = self.total_qty or 1
+
+        payload = [{
+            "ThirdPartyToken": "",
+            "SenderDetails": {
+                "SenderName": "TEST Outletna",
+                "SenderCompanyName": "TEST Outletna",
+                "SenderCountryCode": "MA",
+                "SenderAdd1": "Casablanca",
+                "SenderAdd2": "Casablanca",
+                "SenderAdd3": "",
+                "SenderAddCity": "Casablanca",
+                "SenderAddState": "Casablanca",
+                "SenderAddPostcode": "20000",
+                "SenderPhone": "99999999",
+                "SenderEmail": "test@outletna.com",
+                "SenderFax": "",
+                "SenderKycType": "Passport",
+                "SenderKycNumber": "P00001",
+                "SenderReceivingCountryTaxID": ""
+            },
+            "ReceiverDetails": {
+                "ReceiverName": self.client_name or "Client",
+                "ReceiverCompanyName": self.client_name or "Client",
+                "ReceiverCountryCode": "MA",
+                "ReceiverAdd1": self.adresse or "Address",
+                "ReceiverAdd2": self.second_adresse or "",
+                "ReceiverAdd3": "",
+                "ReceiverAddCity": self.city or "Casablanca",
+                "ReceiverAddState": self.city or "Casablanca",
+                "ReceiverAddPostcode": self.postcode or "20000",
+                "ReceiverMobile": self.mobile or self.phone or "0600000000",
+                "ReceiverPhone": self.phone or self.mobile or "0600000000",
+                "ReceiverEmail": self.email or "client@example.com",
+                "ReceiverAddResidential": "N",
+                "ReceiverFax": "",
+                "ReceiverKycType": "Passport",
+                "ReceiverKycNumber": "P00005"
+            },
+            "PackageDetails": {
+                "GoodsDescription": f"Commande {self.reference or self.ticket_id}",
+                "CustomValue": 100.00,
+                "CustomCurrencyCode": "MAD",
+                "InsuranceValue": "0.00",
+                "InsuranceCurrencyCode": "MAD",
+                "ShipmentTerm": "",
+                "GoodsOriginCountryCode": "MA",
+                "DeliveryInstructions": "Livraison commande e-commerce",
+                "Weight": total_weight,
+                "WeightMeasurement": "KG",
+                "NoOfItems": int(self.total_qty),
+                "CubicL": 30,
+                "CubicW": 30,
+                "CubicH": 30,
+                "CubicWeight": 0.0,
+                "ServiceTypeName": "EN",
+                "BookPickUP": False,
+                "AlternateRef": "",
+                "SenderRef1": self.reference or self.ticket_id,
+                "SenderRef2": "",
+                "SenderRef3": "",
+                "DeliveryAgentCode": "",
+                "DeliveryRouteCode": "",
+                "BusinessType": "B2C",
+                "ShipmentResponseItem": [{
+                    "ItemAlt": "",
+                    "ItemNoOfPcs": 1,
+                    "ItemCubicL": 30,
+                    "ItemCubicW": 30,
+                    "ItemCubicH": 30,
+                    "ItemWeight": total_weight,
+                    "ItemCubicWeight": 0,
+                    "ItemDescription": "Produits divers",
+                    "ItemCustomValue": 100.00,
+                    "ItemCustomCurrencyCode": "MAD",
+                    "Notes": f"Commande {self.reference or self.ticket_id}",
+                    "Pieces": [{
+                        "HarmonisedCode": "hs001",
+                        "GoodsDescription": "Produits e-commerce",
+                        "Content": "Divers",
+                        "Notes": "Articles commande",
+                        "SenderRef1": self.reference or self.ticket_id,
+                        "Quantity": int(self.total_qty),
+                        "Weight": total_weight,
+                        "ManufactureCountryCode": "MA",
+                        "OriginCountryCode": "MA",
+                        "CurrencyCode": "MAD",
+                        "CustomsValue": 100.00
+                    }]
+                }],
+                "CODAmount": 0.0,
+                "CODCurrencyCode": "MAD",
+                "Bag": 0,
+                "Notes": f"Commande Website - Batch: {self.batch_number or 'N/A'}",
+                "OriginLocCode": "",
+                "BagNumber": 0,
+                "DeadWeight": total_weight,
+                "ReasonExport": "",
+                "DestTaxes": 0.0,
+                "Security": 0.0,
+                "Surcharge": 0.0,
+                "ReceiverTaxID": "",
+                "OrderNumber": self.ticket_id,
+                "Incoterms": "CIF",
+                "ClearanceReference": ""
+            },
+            "PickupDetails": {
+                "ReadyTime": fields.Datetime.now().strftime("%Y/%m/%d 09:00:00"),
+                "CloseTime": fields.Datetime.now().strftime("%Y/%m/%d 18:00:00"),
+                "SpecialInstructions": "TEST Pickup commande e-commerce",
+                "Address1": "Casablanca",
+                "Address2": "Casablanca",
+                "Address3": "",
+                "AddressState": "Casablanca",
+                "AddressCity": "Casablanca",
+                "AddressPostalCode": "20000",
+                "AddressCountryCode": "MA"
+            }
+        }]
+
+        try:
+            _logger.info(f"Creating shipment for order {self.ticket_id}")
+            _logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
+
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+
+            result = response.json()
+            _logger.info(f"Shipment API response: {result}")
+
+            if result and len(result) > 0:
+                shipment_data = result[0]
+
+                if shipment_data.get('ShipmentNumber'):
+                    # Update order with shipment info
+                    self.write({
+                        'shipment_number': shipment_data.get('ShipmentNumber'),
+                        'label_url': shipment_data.get('LabelURL'),
+                        'shipment_created': True,
+                        'status': 'delivered'
+                    })
+
+                    # Post message in chatter
+                    self.message_post(
+                        body=f"Colis créé avec succès<br/>"
+                             f"Numéro de colis: <b>{shipment_data.get('ShipmentNumber')}</b><br/>"
+                             f"Référence: {shipment_data.get('SenderRef')}<br/>"
+                             f"<a href='{shipment_data.get('LabelURL')}' target='_blank'>Voir l'étiquette</a>"
+                    )
+
+                    _logger.info(f"Shipment created successfully: {shipment_data.get('ShipmentNumber')}")
+
+                    return {
+                        'type': 'ir.actions.client',
+                        'tag': 'display_notification',
+                        'params': {
+                            'title': 'Succès',
+                            'message': f"Colis créé avec succès!<br/>Numéro: {shipment_data.get('ShipmentNumber')}",
+                            'type': 'success',
+                            'sticky': True
+                        }
+                    }
+                else:
+                    error_msg = shipment_data.get('ErrMessage', 'Erreur inconnue')
+                    _logger.error(f"Shipment creation failed: {error_msg}")
+
+                    self.message_post(
+                        body=f"Erreur lors de la création du colis: {error_msg}"
+                    )
+
+                    return {
+                        'type': 'ir.actions.client',
+                        'tag': 'display_notification',
+                        'params': {
+                            'title': 'Erreur',
+                            'message': f"Erreur API: {error_msg}",
+                            'type': 'danger'
+                        }
+                    }
+
+        except requests.exceptions.RequestException as e:
+            _logger.error(f"Error calling PostShipping API: {str(e)}")
+
+            self.message_post(
+                body=f"Erreur de connexion à l'API: {str(e)}"
+            )
+
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Erreur',
+                    'message': f"Erreur de connexion: {str(e)}",
+                    'type': 'danger'
+                }
+            }
+        except Exception as e:
+            _logger.error(f"Unexpected error creating shipment: {str(e)}")
+
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Erreur',
+                    'message': f"Erreur inattendue: {str(e)}",
+                    'type': 'danger'
+                }
+            }
+
+    def action_print_label(self):
+        """Open label URL in new window"""
+        self.ensure_one()
+
+        if not self.label_url:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Erreur',
+                    'message': "Aucune étiquette disponible. Veuillez d'abord créer le colis.",
+                    'type': 'warning'
+                }
+            }
+
+        return {
+            'type': 'ir.actions.act_url',
+            'url': self.label_url,
+            'target': 'new',
+        }
+
+    def action_open_tracking(self):
+        self.ensure_one()
+
+        if not self.shipment_number:
+            raise UserError("Aucun numéro de colis disponible.")
+
+        tracking_url = f"https://www.aftership.com/track?t={self.shipment_number}&c=medafrica"
+
+        return {
+            "type": "ir.actions.act_url",
+            "url": tracking_url,
+            "target": "new",
+        }
+
+    @api.model
+    def action_create_batch_sale_orders_dynamic(self):
+        """
+        Create batches with maximum quantity of 10.
+        Process orders with status 'en_cours_traitement' and fill batch up to 10 units.
+        """
+        MAX_QTY = 10
+        current_max = MAX_QTY
+
+        # Get all orders with status 'en_cours_traitement' ordered by date
+        orders_to_process = self.search([
+            ('status', '=', 'en_cours_traitement')
+        ], order='date_commande, id')
+
+        if not orders_to_process:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Info',
+                    'message': 'Aucune commande à traiter.',
+                    'type': 'info'
+                }
+            }
+
+        batches_created = 0
+        current_batch = []
+        processed_ids = []
+
+        _logger.info(f"Starting batch processing with MAX_QTY={MAX_QTY}")
+        _logger.info(f"Found {len(orders_to_process)} orders to process")
+
+        # Main loop: go through each order
+        for order in orders_to_process:
+            # Skip if already processed
+            if order.id in processed_ids:
+                continue
+
+            order_qty = order.total_qty
+            _logger.info(f"Checking order {order.ticket_id}: qty={order_qty}, current_max={current_max}")
+
+            # Check if order fits in current max
+            if order_qty <= current_max:
+                # Take this order
+                current_batch.append(order)
+                processed_ids.append(order.id)
+                current_max -= order_qty
+                _logger.info(f"Order {order.ticket_id} added to batch. New max: {current_max}")
+
+                # If current_max reaches 0, create batch immediately
+                if current_max == 0:
+                    _logger.info(f"Max reached 0! Creating batch with {len(current_batch)} orders")
+                    self._create_sale_orders_for_batch(current_batch)
+                    batches_created += 1
+                    current_batch = []
+                    current_max = MAX_QTY
+                    _logger.info(f"Batch created. Reset max to {MAX_QTY}")
+
+            else:
+                # Order doesn't fit in current max, search for smaller orders
+                _logger.info(f"Order {order.ticket_id} (qty={order_qty}) doesn't fit in current_max={current_max}")
+                _logger.info(f"Searching for smaller orders that fit...")
+
+                # Look for other orders that fit in remaining capacity
+                remaining_orders = [
+                    o for o in orders_to_process
+                    if o.id not in processed_ids and o.total_qty <= current_max
+                ]
+
+                if remaining_orders:
+                    _logger.info(f"Found {len(remaining_orders)} smaller orders that fit")
+
+                    # Add all fitting orders
+                    for small_order in remaining_orders:
+                        if small_order.total_qty <= current_max:
+                            current_batch.append(small_order)
+                            processed_ids.append(small_order.id)
+                            current_max -= small_order.total_qty
+                            _logger.info(
+                                f"Added order {small_order.ticket_id} (qty={small_order.total_qty}). New max: {current_max}")
+
+                            if current_max == 0:
+                                break
+
+                # If we have orders in batch, create it
+                if current_batch:
+                    _logger.info(f"Creating batch with {len(current_batch)} orders. Remaining max: {current_max}")
+                    self._create_sale_orders_for_batch(current_batch)
+                    batches_created += 1
+                    current_batch = []
+                    current_max = MAX_QTY
+                    _logger.info(f"Batch created. Reset max to {MAX_QTY}")
+
+                # Now check if the original order (that didn't fit) can fit in new max
+                if order.id not in processed_ids and order_qty <= current_max:
+                    current_batch.append(order)
+                    processed_ids.append(order.id)
+                    current_max -= order_qty
+                    _logger.info(f"Order {order.ticket_id} now added to new batch. New max: {current_max}")
+
+                    if current_max == 0:
+                        _logger.info(f"Max reached 0! Creating batch")
+                        self._create_sale_orders_for_batch(current_batch)
+                        batches_created += 1
+                        current_batch = []
+                        current_max = MAX_QTY
+                        _logger.info(f"Reset max to {MAX_QTY}")
+
+        # Process any remaining orders in the last batch
+        if current_batch:
+            _logger.info(f"Creating final batch with {len(current_batch)} remaining orders")
+            self._create_sale_orders_for_batch(current_batch)
+            batches_created += 1
+
+        final_message = (
+            f'{batches_created} batch(es) créé(s)<br/>'
+            f'{len(processed_ids)}/{len(orders_to_process)} commandes traitées'
+        )
+        '''
+        final_message = (
+            f'{batches_created} batch(es) créé(s)<br/>'
+            f'Capacité restante: {current_max}/{MAX_QTY}<br/>'
+            f'{len(processed_ids)}/{len(orders_to_process)} commandes traitées'
+        )
+        '''
+        _logger.info(f"Batch processing completed: {batches_created} batches created")
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Traitement Terminé',
+                'message': final_message,
+                'type': 'success',
+                'sticky': True
+            }
+        }
+
+    def _create_sale_orders_for_batch(self, orders):
+        """Create sale orders for a batch of website orders"""
+        if not orders:
+            return
+
+        # Generate batch number
+        batch_number = self._get_next_batch_number()
+        _logger.info(f"Creating sale orders for batch {batch_number} with {len(orders)} order(s)")
+
+        created_pickings = []  # List to store all created pickings
+
+        for order in orders:
+            # Find or create partner
             partner = self.env['res.partner'].search([('name', 'ilike', order.client_name)], limit=1)
             if not partner:
-                _logger.warning("Aucun client trouvé avec le nom '%s' pour la commande %s", order.client_name,order.ticket_id)
-                # On crée le client si inexistant
                 partner = self.env['res.partner'].create({
-                    'name': order.client_name or "Client Website inconnu",
+                    'name': order.client_name or "Client Website",
                     'email': order.email or False,
                     'phone': order.phone or order.mobile or False,
                     'street': order.adresse or '',
+                    'street2': order.second_adresse or '',
                     'city': order.city or '',
                     'zip': order.postcode or '',
                 })
-                _logger.info("Nouveau client créé : %s", partner.name)
+                _logger.info(f"New partner created: {partner.name}")
 
-            # Créer la commande de vente
+            # Create sale order
             sale_order_vals = {
                 'partner_id': partner.id,
                 'date_order': order.date_commande or fields.Datetime.now(),
-                'origin': order.reference or order.ticket_id,
-                'note': f"Commande Website - Référence: {order.reference or order.ticket_id}",
+                'origin': f"{order.reference or order.ticket_id} - Batch: {batch_number}",
+                'note': f"Commande Website\nRéférence: {order.reference or order.ticket_id}\nBatch: {batch_number}",
             }
 
             sale_order = self.env['sale.order'].create(sale_order_vals)
-            _logger.info("Commande de vente %s créée pour la commande website %s", sale_order.name, order.ticket_id)
+            _logger.info(f"Sale order {sale_order.name} created for website order {order.ticket_id}")
 
-            # Créer les lignes
+            # Create order lines
             for line in order.line_ids:
                 if not line.product_id:
-                    _logger.warning("Produit manquant pour la ligne (Code barre: %s)", line.code_barre)
+                    _logger.warning(f"Product missing for line (Barcode: {line.code_barre})")
                     continue
 
                 line_vals = {
@@ -1680,32 +2165,157 @@ class WebsiteOrder(models.Model):
                     'product_id': line.product_id.id,
                     'product_uom_qty': line.quantity,
                     'price_unit': line.price,
-                    'discount': line.discount,
+                    'discount': line.discount if hasattr(line, 'discount') else 0,
                 }
                 self.env['sale.order.line'].create(line_vals)
 
-            # Lier la commande au website order
-            order.write({
-                'status': 'prepare',
-            })
-            _logger.info("Commande website %s liée à %s", order.ticket_id, sale_order.name)
+            # Confirm the sale order
+            try:
+                sale_order.action_confirm()
+                _logger.info(f"Sale order {sale_order.name} confirmed successfully")
+
+                # Collect the delivery pickings created from the sale order
+                pickings = sale_order.picking_ids.filtered(lambda p: p.state not in ('done', 'cancel'))
+                if pickings:
+                    created_pickings.extend(pickings.ids)
+                    _logger.info(f"Found {len(pickings)} picking(s) for sale order {sale_order.name}")
+
+            except Exception as e:
+                _logger.error(f"Error confirming sale order {sale_order.name}: {str(e)}")
+
+            # Update website order status, batch number and link to sale order
+            try:
+                order.write({
+                    'status': 'en_cours_preparation',
+                    'batch_number': batch_number,
+                    'sale_order_id': sale_order.id,
+                    'sale_order_ref': sale_order.name or False,
+                })
+            except Exception as e:
+                _logger.exception(f"Failed to write sale_order_id for website order {order.id}: {e}")
+                order.write({
+                    'status': 'en_cours_preparation',
+                    'batch_number': batch_number,
+                    'sale_order_ref': sale_order.name or False,
+                    'sale_order_id': False,
+                })
+
+            # Post message in chatter
+            order.message_post(
+                body=f"Commande de vente créée: {sale_order.name}<br/>"
+                     f"Batch: {batch_number}<br/>"
+                     f"Quantité totale: {order.total_qty}"
+            )
+
+            _logger.info(
+                f"Website order {order.ticket_id} updated - Status: en_cours_preparation, Batch: {batch_number}"
+            )
+
+        # Create batch picking for all created pickings
+        if created_pickings:
+            try:
+                self._create_picking_batch(created_pickings, batch_number)
+                _logger.info(f"Batch picking created for batch {batch_number} with {len(created_pickings)} picking(s)")
+            except Exception as e:
+                _logger.error(f"Error creating batch picking for batch {batch_number}: {str(e)}")
+
+    def _create_picking_batch(self, picking_ids, batch_number):
+        """Create a batch picking for the given pickings"""
+        if not picking_ids:
+            return
+
+        pickings = self.env['stock.picking'].browse(picking_ids)
+
+        # Check if all pickings belong to the same company
+        companies = pickings.mapped('company_id')
+        if len(companies) > 1:
+            _logger.warning(f"Pickings belong to multiple companies. Creating separate batches.")
+            # Group by company
+            for company in companies:
+                company_pickings = pickings.filtered(lambda p: p.company_id == company)
+                self._create_single_batch(company_pickings, batch_number)
+        else:
+            self._create_single_batch(pickings, batch_number)
+
+    def _create_single_batch(self, pickings, batch_number):
+        """Create a single batch for the given pickings"""
+        if not pickings:
+            return
+
+        # Get the first picking's company and picking type
+        company = pickings[0].company_id
+        picking_type = pickings[0].picking_type_id
+
+        # Create the batch picking
+        batch_vals = {
+            'user_id': self.env.user.id,  # Current user
+            'company_id': company.id,
+            'picking_type_id': picking_type.id,
+        }
+
+        batch = self.env['stock.picking.batch'].create(batch_vals)
+        _logger.info(f"Batch picking {batch.name} created")
+
+        # Attach pickings to the batch
+        pickings.write({'batch_id': batch.id})
+        _logger.info(f"Attached {len(pickings)} picking(s) to batch {batch.name}")
+
+        # Confirm the batch (not draft)
+        try:
+            batch.action_confirm()
+            _logger.info(f"Batch {batch.name} confirmed successfully")
+        except Exception as e:
+            _logger.error(f"Error confirming batch {batch.name}: {str(e)}")
+
+        # Post message to all related website orders
+        for picking in pickings:
+            # Find related website order through sale order
+            website_order = self.search([('sale_order_id', '=', picking.sale_id.id)], limit=1)
+            if website_order:
+                website_order.message_post(
+                    body=f"Batch de préparation créé: <b>{batch.name}</b><br/>"
+                         f"Bon de livraison: {picking.name}<br/>"
+                         f"Responsable: {self.env.user.name}"
+                )
+
+        return batch
+
+    @api.model
+    def cron_check_sale_order_ref_status(self):
+
+        '''cron to check statuus in stock pickking model'''
+        orders = self.search([
+            ('status', '=', 'en_cours_preparation'),
+            ('sale_order_ref', '!=', False),
+        ])
+        if not orders:
+            _logger.info("[CRON] No orders found in en_cours_preparation.")
+            return True
+        '''here we found it so we can get the status '''
+        _logger.info(f"[CRON] Checking status for {len(orders)} orders...")
+
+        Picking = self.env['stock.picking']
+
+        for order in orders:
+            picking = Picking.search([
+                ('origin', '=', order.sale_order_ref)
+            ], limit=1)
+
+            if not picking:
+                _logger.info(f"[CRON] No picking found for order {order.sale_order_ref}")
+                continue
+
+            if picking.state == 'done':
+                order.status = 'commande_prepare'
+                _logger.info(
+                    f"[CRON] Order {order.ticket_id} → stock picking done → status updated to commande_prepare"
+                )
+            else:
+                _logger.info(
+                    f"[CRON] Order {order.ticket_id} still not ready (picking state: {picking.state})"
+                )
 
         return True
-
-    def action_view_sale_order(self):
-        """Open the related sale order"""
-        self.ensure_one()
-        if not self.sale_order_id:
-            raise UserError("Aucune commande de vente associée")
-
-        return {
-            'type': 'ir.actions.act_window',
-            'name': 'Commande de Vente',
-            'res_model': 'sale.order',
-            'res_id': self.sale_order_id.id,
-            'view_mode': 'form',
-            'target': 'current',
-        }
 
 class StockWebsiteOrderLine(models.Model):
     _name = 'stock.website.order.line'
@@ -1745,7 +2355,7 @@ class CustomerFetcher(models.TransientModel):
 
         # Get yesterday and today dates
         today = datetime.now().date()
-        yesterday = today - timedelta(days=15)
+        yesterday = today - timedelta(days=2)
         tomorrow = today + timedelta(days=1)
 
         # Format dates for API filter

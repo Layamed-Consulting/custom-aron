@@ -22,6 +22,8 @@
         'data/fetch.xml',
         'data/cron_variante.xml',
         'data/update_stock.xml',
+        'data/check_status_after_picking.xml',
+        'data/create_sale_order.xml',
     ],
     'installable': True,
     'application': True,
