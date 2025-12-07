@@ -1635,6 +1635,8 @@ class WebsiteOrder(models.Model):
         ('en_cours_traitement', 'En cours de traitement'),
         ('en_cours_preparation', 'En cours de préparation'),
         ('commande_prepare', 'Commande préparée'),
+        ('ready_to_delivery', 'Prêt à être livré'),
+        ('en_cours_de_livraison', 'En cours de Livraison'),
         ('delivered', 'Livré'),
         ('annuler', 'Annulé'),
     ], string="Statut", default='en_cours_traitement', tracking=True)
@@ -1683,6 +1685,8 @@ class WebsiteOrder(models.Model):
         readonly=True,
         help="Nom / référence du bon de commande (copie textuelle pour affichage sécurisé)"
     )
+    BASE_URL = "https://outletna.com/api"
+    WS_KEY = "86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N"
 
     @api.depends('line_ids.quantity')
     def _compute_total_qty(self):
@@ -1700,18 +1704,18 @@ class WebsiteOrder(models.Model):
             return f'S{last_number + 1:06d}'
         except:
             return 'S000001'
-
+    '''pour deploiement'''
     def action_create_shipment(self):
         """Create shipment via PostShipping API"""
         self.ensure_one()
 
-        if self.status != 'commande_prepare':
+        if self.status != 'ready_to_delivery':
             return {
                 'type': 'ir.actions.client',
                 'tag': 'display_notification',
                 'params': {
                     'title': 'Erreur',
-                    'message': 'Le colis ne peut être créé que pour les commandes avec le statut "Commande préparée".',
+                    'message': 'Le colis ne peut être créé que pour les commandes avec le statut "Prêt à être livré".',
                     'type': 'warning'
                 }
             }
@@ -1775,7 +1779,7 @@ class WebsiteOrder(models.Model):
                 "ReceiverKycNumber": "P00005"
             },
             "PackageDetails": {
-                "GoodsDescription": f"Commande {self.reference or self.ticket_id}",
+                "GoodsDescription": f"Commande {self.reference}",
                 "CustomValue": 100.00,
                 "CustomCurrencyCode": "MAD",
                 "InsuranceValue": "0.00",
@@ -1816,7 +1820,7 @@ class WebsiteOrder(models.Model):
                         "GoodsDescription": "Produits e-commerce",
                         "Content": "Divers",
                         "Notes": "Articles commande",
-                        "SenderRef1": self.reference or self.ticket_id,
+                        "SenderRef1": self.reference,
                         "Quantity": int(self.total_qty),
                         "Weight": total_weight,
                         "ManufactureCountryCode": "MA",
@@ -1828,7 +1832,7 @@ class WebsiteOrder(models.Model):
                 "CODAmount": 0.0,
                 "CODCurrencyCode": "MAD",
                 "Bag": 0,
-                "Notes": f"Commande Website - Batch: {self.batch_number or 'N/A'}",
+                "Notes": f"Commande Website",
                 "OriginLocCode": "",
                 "BagNumber": 0,
                 "DeadWeight": total_weight,
@@ -1874,7 +1878,7 @@ class WebsiteOrder(models.Model):
                         'shipment_number': shipment_data.get('ShipmentNumber'),
                         'label_url': shipment_data.get('LabelURL'),
                         'shipment_created': True,
-                        'status': 'delivered'
+                        'status': 'en_cours_de_livraison'
                     })
 
                     # Post message in chatter
@@ -1964,15 +1968,15 @@ class WebsiteOrder(models.Model):
             'url': self.label_url,
             'target': 'new',
         }
-
+    '''pour deploiement'''
     def action_open_tracking(self):
         self.ensure_one()
 
         if not self.shipment_number:
             raise UserError("Aucun numéro de colis disponible.")
-
-        tracking_url = f"https://www.aftership.com/track?t={self.shipment_number}&c=medafrica"
-
+        '''
+        tracking_url = f"https://www.aftership.com/track?t={self.shipment_number}&c=medafrica" '''
+        tracking_url = f"https://medafrica-log.com/tracking/?lang=fr&fusion_privacy_store_ip_ua=false&fusion_privacy_expiration_interval=48&privacy_expiration_action=anonymize"
         return {
             "type": "ir.actions.act_url",
             "url": tracking_url,
@@ -2147,6 +2151,7 @@ class WebsiteOrder(models.Model):
             sale_order_vals = {
                 'partner_id': partner.id,
                 'date_order': order.date_commande or fields.Datetime.now(),
+                'client_order_ref' : order.reference,
                 'origin': f"{order.reference or order.ticket_id} - Batch: {batch_number}",
                 'note': f"Commande Website\nRéférence: {order.reference or order.ticket_id}\nBatch: {batch_number}",
             }
@@ -2280,18 +2285,21 @@ class WebsiteOrder(models.Model):
 
         return batch
 
+    '''pour depoloiement'''
     @api.model
     def cron_check_sale_order_ref_status(self):
+        """Cron to check status in stock picking model."""
 
-        '''cron to check statuus in stock pickking model'''
+        # Only take orders in 'en_cours_preparation'
         orders = self.search([
             ('status', '=', 'en_cours_preparation'),
             ('sale_order_ref', '!=', False),
         ])
+
         if not orders:
             _logger.info("[CRON] No orders found in en_cours_preparation.")
             return True
-        '''here we found it so we can get the status '''
+
         _logger.info(f"[CRON] Checking status for {len(orders)} orders...")
 
         Picking = self.env['stock.picking']
@@ -2305,14 +2313,298 @@ class WebsiteOrder(models.Model):
                 _logger.info(f"[CRON] No picking found for order {order.sale_order_ref}")
                 continue
 
+            # If picking is done → only update orders that are still in en_cours_preparation
             if picking.state == 'done':
-                order.status = 'commande_prepare'
-                _logger.info(
-                    f"[CRON] Order {order.ticket_id} → stock picking done → status updated to commande_prepare"
-                )
+
+                if order.status == 'en_cours_preparation':
+                    order.status = 'commande_prepare'
+                    _logger.info(
+                        f"[CRON] Order {order.ticket_id}: picking done → status changed to commande_prepare"
+                    )
+                else:
+                    # Should not happen because we filtered, but safe check
+                    _logger.info(
+                        f"[CRON] Order {order.ticket_id} picking done but status is '{order.status}', not updated."
+                    )
+
             else:
                 _logger.info(
                     f"[CRON] Order {order.ticket_id} still not ready (picking state: {picking.state})"
+                )
+
+        return True
+
+    @api.model
+    def cron_check_sale_order_invoice_status(self):
+        """Cron to check if related sale order is fully invoiced."""
+
+        _logger.info("[CRON] Checking sale order invoice status...")
+
+        # Get orders that must be checked
+        orders = self.search([
+            ('status', '=', 'commande_prepare'),
+            ('sale_order_ref', '!=', False),
+        ])
+
+        if not orders:
+            _logger.info("[CRON] No orders found in en_cours_preparation.")
+            return True
+
+        SaleOrder = self.env['sale.order']
+
+        _logger.info(f"[CRON] Checking invoice status for {len(orders)} orders...")
+
+        for order in orders:
+
+            sale = SaleOrder.search([
+                ('name', '=', order.sale_order_ref)
+            ], limit=1)
+
+            if not sale:
+                _logger.info(f"[CRON] No sale order found for ref {order.sale_order_ref}")
+                continue
+
+            # Check invoice status
+            # Values: 'no', 'to invoice', 'invoiced'
+            if sale.invoice_status == 'invoiced':
+
+                # Update ONLY if current status is NOT one of these
+                if order.status not in ['en_cours_de_livraison', 'delivered', 'annuler']:
+                    order.status = 'ready_to_delivery'
+                    _logger.info(
+                        f"[CRON] Order {order.ticket_id} → sale order invoiced → status updated to ready_to_delivery"
+                    )
+                else:
+                    _logger.info(
+                        f"[CRON] Order {order.ticket_id} has status '{order.status}', not updated."
+                    )
+            else:
+                _logger.info(
+                    f"[CRON] Order {order.ticket_id}: sale order not fully invoiced "
+                    f"(invoice_status = {sale.invoice_status})"
+                )
+
+            return True
+
+    @api.model
+    def sync_status_to_prestashop(self):
+        _logger.info("Starting PrestaShop status synchronization...")
+
+        # Sync only the supported statuses
+        orders_to_sync = self.search([
+            ('status', 'in', ['en_cours_de_livraison','ready_to_delivery', 'delivered','annuler']),
+            ('reference', '!=', False),
+        ])
+
+        _logger.info(f"Found {len(orders_to_sync)} orders to sync")
+
+        synced_count = 0
+        error_count = 0
+
+        for order in orders_to_sync:
+            try:
+                if self._update_prestashop_order_status(order):
+                    synced_count += 1
+                    _logger.info(f"Successfully synced order {order.reference} with status {order.status}")
+                else:
+                    error_count += 1
+                    _logger.error(f"Failed to sync order {order.reference}")
+            except Exception as e:
+                error_count += 1
+                _logger.error(f"Error syncing order {order.reference}: {str(e)}")
+
+        _logger.info(f"Sync completed. Synced: {synced_count}, Errors: {error_count}")
+        return {
+            'synced': synced_count,
+            'errors': error_count,
+            'total': len(orders_to_sync)
+        }
+
+    def _find_prestashop_order_by_reference(self, reference):
+        """
+        Find PrestaShop order ID by reference using basic authentication
+        """
+        try:
+            url = f"{self.BASE_URL}/orders"
+            params = {
+                'filter[reference]': reference,
+            }
+
+            response = requests.get(url, auth=(self.WS_KEY, ''), params=params, timeout=30)
+            response.raise_for_status()
+
+            root = ET.fromstring(response.content)
+            order_elem = root.find('.//order')
+
+            if order_elem is not None and 'id' in order_elem.attrib:
+                order_id = order_elem.attrib['id']
+                _logger.info(f"Found PrestaShop order ID {order_id} for reference {reference}")
+                return order_id
+            else:
+                _logger.warning(f"No order found in PrestaShop with reference {reference}")
+                return None
+
+        except requests.exceptions.RequestException as e:
+            _logger.error(f"HTTP error while searching for order: {str(e)}")
+            return None
+        except ET.ParseError as e:
+            _logger.error(f"XML parsing error: {str(e)}")
+            return None
+        except Exception as e:
+            _logger.error(f"Unexpected error while searching for order: {str(e)}")
+            return None
+
+    def _update_prestashop_order_status(self, order):
+        """
+        Update PrestaShop order status based on Odoo order status
+        """
+        try:
+            prestashop_order_id = self._find_prestashop_order_by_reference(order.reference)
+
+            if not prestashop_order_id:
+                _logger.warning(f"Order with reference '{order.reference}' not found in PrestaShop")
+                return False
+
+            # Mapping Odoo status to PrestaShop current_state ID
+            status_mapping = {
+                'en_cours_de_livraison': 20,
+                'delivered': 5,
+                'annuler':6,
+            }
+
+            prestashop_status_id = status_mapping.get(order.status)
+
+            if not prestashop_status_id:
+                _logger.warning(f"No PrestaShop status mapping for Odoo status '{order.status}'")
+                return False
+
+            return self._update_prestashop_order_status_by_id(prestashop_order_id, prestashop_status_id)
+
+        except Exception as e:
+            _logger.error(f"Error updating PrestaShop order status: {str(e)}")
+            return False
+
+    def _update_prestashop_order_status_by_id(self, order_id, status_id):
+        """
+        Update the current_state of a PrestaShop order
+        """
+        try:
+            url = f"{self.BASE_URL}/orders/{order_id}"
+            response = requests.get(url, auth=(self.WS_KEY, ''))
+            response.raise_for_status()
+
+            root = ET.fromstring(response.content)
+
+            current_state = root.find('.//current_state')
+            if current_state is not None:
+                current_state.text = str(status_id)
+            else:
+                _logger.error(f"Could not find current_state field in order {order_id}")
+                return False
+
+            xml_data = ET.tostring(root, encoding='utf-8', method='xml')
+
+            headers = {'Content-Type': 'application/xml'}
+
+            update_response = requests.put(
+                url,
+                auth=(self.WS_KEY, ''),
+                data=xml_data,
+                headers=headers
+            )
+            update_response.raise_for_status()
+
+            _logger.info(f"Successfully updated PrestaShop order {order_id} to status {status_id}")
+            return True
+
+        except requests.exceptions.RequestException as e:
+            _logger.error(f"HTTP error while updating order status: {str(e)}")
+            return False
+        except ET.ParseError as e:
+            _logger.error(f"XML parsing error: {str(e)}")
+            return False
+        except Exception as e:
+            _logger.error(f"Unexpected error while updating order status: {str(e)}")
+            return False
+    @api.model
+    def _create_shippement_number_to_prestashop(self):
+        """Send shipment_number to Prestashop (Basic Auth + XML)."""
+        _logger.info("[CRON] Sync shipping_number → Prestashop started...")
+        orders = self.search([
+            ('status', '=', 'en_cours_de_livraison'),
+            ('shipment_number', '!=', False),
+            ('reference', '!=', False),
+        ])
+        if not orders:
+            _logger.info("[CRON] No orders needing sync.")
+            return True
+        for order in orders:
+            try:
+                # ---- 1) FIND ORDER ID BY REFERENCE ----
+                filter_url = (
+                    f"{order.BASE_URL}/orders/"
+                    f"?filter[reference]={order.reference}"
+                )
+                _logger.info(f"[CRON] Searching Prestashop order with reference {order.reference}")
+                response = requests.get(
+                    filter_url,
+                    auth=(order.WS_KEY, ''),  # Basic Auth
+                    timeout=20
+                )
+                response.raise_for_status()
+
+                xml = etree.fromstring(response.content)
+
+                ps_order_nodes = xml.findall(".//order")
+                if not ps_order_nodes:
+                    _logger.error(f"[CRON] No Prestashop order found for reference {order.reference}")
+                    continue
+
+                ps_order_id = ps_order_nodes[0].get("id")
+
+                _logger.info(f"[CRON] Prestashop order ID found: {ps_order_id}")
+
+                # ---- 2) GET FULL ORDER DATA ----
+                order_url = f"{order.BASE_URL}/orders/{ps_order_id}"
+
+                response = requests.get(
+                    order_url,
+                    auth=(order.WS_KEY, ''),
+                    timeout=120,
+                )
+                response.raise_for_status()
+
+                order_xml = etree.fromstring(response.content)
+
+                # ---- 3) UPDATE SHIPPING NUMBER ----
+                shipping_node = order_xml.find(".//shipping_number")
+                if shipping_node is not None:
+                    shipping_node.text = order.shipment_number
+                else:
+                    _logger.error(f"[CRON] Could not find <shipping_number> node for order {order.reference}")
+                    continue
+
+                updated_xml = etree.tostring(order_xml, encoding='utf-8', xml_declaration=True)
+
+                # ---- 4) PUT BACK TO PRESTASHOP ----
+                put_response = requests.put(
+                    order_url,
+                    data=updated_xml,
+                    headers={'Content-Type': 'application/xml'},
+                    auth=(order.WS_KEY, ''),
+                    timeout=120,
+                )
+                put_response.raise_for_status()
+
+                _logger.info(f"[CRON] Shipping number updated successfully for {order.reference}")
+
+                order.message_post(
+                    body=f"Numéro de colis : {order.shipment_number})."
+                )
+
+            except Exception as e:
+                _logger.error(
+                    f"[CRON] ERROR while syncing order {order.reference}: {e}"
                 )
 
         return True

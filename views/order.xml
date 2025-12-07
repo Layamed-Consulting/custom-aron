@@ -91,7 +91,7 @@
                         string="Create Shipment"
                         type="object"
                         class="btn-success"
-                        invisible="status != 'commande_prepare' or shipment_created"/>
+                        invisible="shipment_created or status not in 'ready_to_delivery'"/>
 
                 <!-- Button to print label - only visible when shipment is created -->
                 <button name="action_print_label"
