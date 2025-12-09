@@ -2349,14 +2349,14 @@ class WebsiteOrder(models.Model):
 
         _logger.info("[CRON] Checking sale order invoice status...")
 
-        # Get orders that must be checked
+        # Get orders to check
         orders = self.search([
             ('status', '=', 'commande_prepare'),
             ('sale_order_ref', '!=', False),
         ])
 
         if not orders:
-            _logger.info("[CRON] No orders found in en_cours_preparation.")
+            _logger.info("[CRON] No orders found in commande_prepare.")
             return True
 
         SaleOrder = self.env['sale.order']
@@ -2373,27 +2373,34 @@ class WebsiteOrder(models.Model):
                 _logger.info(f"[CRON] No sale order found for ref {order.sale_order_ref}")
                 continue
 
-            # Check invoice status
-            # Values: 'no', 'to invoice', 'invoiced'
+            _logger.info(
+                f"[CRON] Order {order.ticket_id} → sale {sale.name} "
+                f"→ invoice_status = {sale.invoice_status}"
+            )
+
+            # ONLY update invoiced orders
             if sale.invoice_status == 'invoiced':
 
-                # Update ONLY if current status is NOT one of these
                 if order.status not in ['en_cours_de_livraison', 'delivered', 'annuler']:
                     order.status = 'ready_to_delivery'
                     _logger.info(
-                        f"[CRON] Order {order.ticket_id} → sale order invoiced → status updated to ready_to_delivery"
+                        f"[CRON] Order {order.ticket_id} updated to ready_to_delivery"
                     )
                 else:
                     _logger.info(
-                        f"[CRON] Order {order.ticket_id} has status '{order.status}', not updated."
+                        f"[CRON] Order {order.ticket_id} already in final state ({order.status})"
                     )
+
             else:
+                # Just skip and continue, DO NOT STOP the cron
                 _logger.info(
-                    f"[CRON] Order {order.ticket_id}: sale order not fully invoiced "
+                    f"[CRON] Order {order.ticket_id} skipped "
                     f"(invoice_status = {sale.invoice_status})"
                 )
 
-            return True
+        # RETURN ONLY AFTER LOOP FINISHES
+        _logger.info("[CRON] Invoice status check finished.")
+        return True
 
     @api.model
     def sync_status_to_prestashop(self):
