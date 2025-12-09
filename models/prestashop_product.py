@@ -1611,6 +1611,13 @@ class ProductProductPrest(models.Model):
             }
         }
 
+class pickingmaximum(models.Model):
+    _name ='picking.maximum'
+    _description = 'maiximum number for create order'
+    _inherit = ['mail.thread', 'mail.activity.mixin']
+
+    number_max = fields.Integer(string="Number max")
+
 class WebsiteOrder(models.Model):
     _name = 'stock.website.order'
     _description = 'Stock Website Order Synced from API'
@@ -1983,13 +1990,14 @@ class WebsiteOrder(models.Model):
             "target": "new",
         }
 
-    @api.model
+
     def action_create_batch_sale_orders_dynamic(self):
         """
         Create batches with maximum quantity of 10.
         Process orders with status 'en_cours_traitement' and fill batch up to 10 units.
         """
-        MAX_QTY = 10
+        config = self.env['picking.maximum'].search([], limit=1)
+        MAX_QTY = config.number_max if config and config.number_max > 0 else 10
         current_max = MAX_QTY
 
         # Get all orders with status 'en_cours_traitement' ordered by date
