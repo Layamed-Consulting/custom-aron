@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import time
 import json
 import xml.etree.ElementTree as ET
+from lxml import etree
 import logging
 _logger = logging.getLogger(__name__)
 
