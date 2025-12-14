@@ -11,7 +11,7 @@
     'author': 'ARONIA',
     'website': 'http://www.aronia.com',
     'category': '',
-    'depends': ['base','product','queue_job'],
+    'depends': ['base','product','queue_job','sale_management', 'stock', 'account'],
     'data': [
         'views/product_product_prestashop.xml',
         'views/view_product_prestashop_number.xml',
