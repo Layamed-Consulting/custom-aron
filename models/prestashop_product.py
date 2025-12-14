@@ -1991,7 +1991,148 @@ class WebsiteOrder(models.Model):
             "target": "new",
         }
 
+    def action_create_batch_sale_orders_dynamic(self):
+        """
+        Create sale orders from website orders.
+        - Remove maximum quantity restriction.
+        - Keep the same batch number for all orders processed in this run.
+        - Do NOT create stock picking batches.
+        """
+        # Get all orders with status 'en_cours_traitement' ordered by date
+        orders_to_process = self.search([
+            ('status', '=', 'en_cours_traitement')
+        ], order='date_commande, id')
 
+        if not orders_to_process:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Info',
+                    'message': 'Aucune commande à traiter.',
+                    'type': 'info'
+                }
+            }
+
+        batches_created = 0
+        processed_ids = []
+
+        _logger.info(f"Starting processing {len(orders_to_process)} website orders")
+
+        # Main loop: process each order
+        for order in orders_to_process:
+            if order.id in processed_ids:
+                continue
+
+            self._create_sale_orders_for_batch([order])
+            processed_ids.append(order.id)
+            batches_created += 1
+
+        final_message = (
+            f'{batches_created} batch(es) traité(s)<br/>'
+            f'{len(processed_ids)}/{len(orders_to_process)} commandes traitées'
+        )
+
+        _logger.info(f"Website order processing completed: {batches_created} batch(es)")
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Traitement Terminé',
+                'message': final_message,
+                'type': 'success',
+                'sticky': True
+            }
+        }
+    def _create_sale_orders_for_batch(self, orders):
+        """Create sale orders for a batch of website orders without picking batch"""
+        if not orders:
+            return
+
+        # Generate batch number (keep same for all orders in this call)
+        batch_number = self._get_next_batch_number()
+        _logger.info(f"Creating sale orders for batch {batch_number} with {len(orders)} order(s)")
+
+        for order in orders:
+            # Find or create partner
+            partner = self.env['res.partner'].search([('name', 'ilike', order.client_name)], limit=1)
+            if not partner:
+                partner = self.env['res.partner'].create({
+                    'name': order.client_name or "Client Website",
+                    'email': order.email or False,
+                    'phone': order.phone or order.mobile or False,
+                    'street': order.adresse or '',
+                    'street2': order.second_adresse or '',
+                    'city': order.city or '',
+                    'zip': order.postcode or '',
+                })
+                _logger.info(f"New partner created: {partner.name}")
+
+            # Create sale order
+            sale_order_vals = {
+                'partner_id': partner.id,
+                'date_order': order.date_commande or fields.Datetime.now(),
+                'client_order_ref': order.reference,
+                'origin': f"{order.reference or order.ticket_id} - Batch: {batch_number}",
+                'note': f"Commande Website\nRéférence: {order.reference or order.ticket_id}\nBatch: {batch_number}",
+            }
+
+            sale_order = self.env['sale.order'].create(sale_order_vals)
+            _logger.info(f"Sale order {sale_order.name} created for website order {order.ticket_id}")
+
+            # Create order lines
+            for line in order.line_ids:
+                if not line.product_id:
+                    _logger.warning(f"Product missing for line (Barcode: {line.code_barre})")
+                    continue
+
+                line_vals = {
+                    'order_id': sale_order.id,
+                    'product_id': line.product_id.id,
+                    'product_uom_qty': line.quantity,
+                    'price_unit': line.price,
+                    'discount': line.discount if hasattr(line, 'discount') else 0,
+                }
+                self.env['sale.order.line'].create(line_vals)
+
+            # Confirm the sale order
+            try:
+                sale_order.action_confirm()
+                _logger.info(f"Sale order {sale_order.name} confirmed successfully")
+            except Exception as e:
+                _logger.error(f"Error confirming sale order {sale_order.name}: {str(e)}")
+
+            # Update website order status, batch number and link to sale order
+            try:
+                order.write({
+                    'status': 'en_cours_preparation',
+                    'batch_number': batch_number,
+                    'sale_order_id': sale_order.id,
+                    'sale_order_ref': sale_order.name or False,
+                })
+            except Exception as e:
+                _logger.exception(f"Failed to write sale_order_id for website order {order.id}: {e}")
+                order.write({
+                    'status': 'en_cours_preparation',
+                    'batch_number': batch_number,
+                    'sale_order_ref': sale_order.name or False,
+                    'sale_order_id': False,
+                })
+
+            # Post message in chatter
+            '''
+            order.message_post(
+                body=f"Commande de vente créée: {sale_order.name}<br/>"
+                     f"Batch: {batch_number}<br/>"
+                     f"Quantité totale: {order.total_qty}"
+            )
+            '''
+            _logger.info(
+                f"Website order {order.ticket_id} updated - Status: en_cours_preparation, Batch: {batch_number}"
+            )
+
+    '''
     def action_create_batch_sale_orders_dynamic(self):
         """
         Create batches with maximum quantity of 10.
@@ -2110,13 +2251,13 @@ class WebsiteOrder(models.Model):
             f'{batches_created} batch(es) créé(s)<br/>'
             f'{len(processed_ids)}/{len(orders_to_process)} commandes traitées'
         )
-        '''
+        
         final_message = (
             f'{batches_created} batch(es) créé(s)<br/>'
             f'Capacité restante: {current_max}/{MAX_QTY}<br/>'
             f'{len(processed_ids)}/{len(orders_to_process)} commandes traitées'
         )
-        '''
+        
         _logger.info(f"Batch processing completed: {batches_created} batches created")
 
         return {
@@ -2232,7 +2373,7 @@ class WebsiteOrder(models.Model):
                 _logger.info(f"Batch picking created for batch {batch_number} with {len(created_pickings)} picking(s)")
             except Exception as e:
                 _logger.error(f"Error creating batch picking for batch {batch_number}: {str(e)}")
-
+    
     def _create_picking_batch(self, picking_ids, batch_number):
         """Create a batch picking for the given pickings"""
         if not picking_ids:
@@ -2250,7 +2391,7 @@ class WebsiteOrder(models.Model):
                 self._create_single_batch(company_pickings, batch_number)
         else:
             self._create_single_batch(pickings, batch_number)
-
+    
     def _create_single_batch(self, pickings, batch_number):
         """Create a single batch for the given pickings"""
         if not pickings:
@@ -2293,7 +2434,7 @@ class WebsiteOrder(models.Model):
                 )
 
         return batch
-
+    '''
     '''pour depoloiement'''
     @api.model
     def cron_check_sale_order_ref_status(self):
