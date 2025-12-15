@@ -18,6 +18,7 @@
         'views/view_product_template_prestashop.xml',
         'views/order.xml',
         'views/number_max.xml',
+        'views/generate_batch.xml',
         'security/ir.model.access.csv',
         'data/cron.xml',
         'data/fetch.xml',
