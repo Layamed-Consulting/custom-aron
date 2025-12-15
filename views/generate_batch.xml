@@ -1,0 +1,19 @@
+<odoo>
+    <!-- Inherit stock.picking.batch form view to add button -->
+    <record id="view_picking_batch_form_inherit_package" model="ir.ui.view">
+        <field name="name">stock.picking.batch.form.inherit.package</field>
+        <field name="model">stock.picking.batch</field>
+        <field name="inherit_id" ref="stock_picking_batch.stock_picking_batch_form"/>
+        <field name="arch" type="xml">
+
+            <!-- Add button in header after existing buttons -->
+            <xpath expr="//header/button[@name='action_done']" position="after">
+                <button string="Generate Destination Package"
+                        name="action_generate_destination_packages"
+                        type="object"
+                        class="btn-primary"/>
+            </xpath>
+
+        </field>
+    </record>
+</odoo>
