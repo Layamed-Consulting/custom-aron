@@ -301,7 +301,7 @@ class ProductTemplate(models.Model):
         {manufacturer_xml}
         <active><![CDATA[1]]></active>
         <reference><![CDATA[{product.x_studio_item_id}]]></reference>
-        <ean13><![CDATA[{ean_value}]]></ean13>
+        <ean13><![CDATA[]]></ean13>
         <price><![CDATA[{product.list_price:.2f}]]></price>
         <minimal_quantity><![CDATA[1]]></minimal_quantity>
         <available_for_order><![CDATA[1]]></available_for_order>
@@ -930,7 +930,7 @@ class ProductProductPrest(models.Model):
   <combination>
     <id_product><![CDATA[{template.id_prestashop}]]></id_product>
     <reference><![CDATA[{variant.default_code}]]></reference>
-    <ean13><![CDATA[{variant.default_code}]]></ean13>
+    <ean13><![CDATA[]]></ean13>
     <price><![CDATA[{price_diff:.2f}]]></price>
     <minimal_quantity><![CDATA[1]]></minimal_quantity>
     <associations>
@@ -1320,7 +1320,7 @@ class ProductProductPrest(models.Model):
 
         for product_info in products_batch:
             try:
-                ean13 = product_info['ean13']
+                ean13 = product_info['reference']
                 new_qty = product_info['qty_available']
                 product_name = product_info['name']
 
@@ -1343,7 +1343,7 @@ class ProductProductPrest(models.Model):
 
             except Exception as e:
                 sync_failed += 1
-                _logger.error(f"JOB: Error processing {product_info.get('ean13', 'unknown')}: {e}")
+                _logger.error(f"JOB: Error processing {product_info.get('reference', 'unknown')}: {e}")
 
         _logger.info(f"JOB: Batch completed - Success: {sync_success}, Failed: {sync_failed}")
 
@@ -1353,7 +1353,7 @@ class ProductProductPrest(models.Model):
         """Search for combination by EAN13 and update its stock directly"""
         try:
             # Step 1: Search for combinations by EAN13
-            search_url = f"{base_url}/combinations?filter[ean13]={ean13}&display=full"
+            search_url = f"{base_url}/combinations?filter[reference]={ean13}&display=full"
             _logger.info(f"Searching combinations: {search_url}")
 
             combinations_root = self._get_xml(search_url, headers)
@@ -1514,7 +1514,7 @@ class ProductProductPrest(models.Model):
                 affected_products.append({
                     'id': product.id,
                     'name': product.name,
-                    'ean13': product.default_code,
+                    'reference': product.default_code,
                     'qty_available': product.qty_available,
                     'write_date': product.write_date
                 })
@@ -1581,7 +1581,7 @@ class ProductProductPrest(models.Model):
             products_to_sync.append({
                 'id': product.id,
                 'name': product.name,
-                'ean13': product.default_code,
+                'reference': product.default_code,
                 'qty_available': product.qty_available,
                 'write_date': product.write_date
             })
@@ -2906,7 +2906,7 @@ class CustomerFetcher(models.TransientModel):
 
                 for row in order_rows:
                     product_name = row.findtext('product_name', default='').strip()
-                    product_reference = row.findtext('product_ean13', default='').strip()
+                    product_reference = row.findtext('product_reference', default='').strip()
                     quantity = row.findtext('product_quantity', default='0').strip()
                     price = row.findtext('product_price', default='0.00').strip()
                     unit_price_incl = row.findtext('unit_price_tax_incl', default='0.00').strip()
