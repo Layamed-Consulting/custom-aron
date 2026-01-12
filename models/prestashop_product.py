@@ -300,6 +300,7 @@ class ProductTemplate(models.Model):
         <id_category_default><![CDATA[{default_category}]]></id_category_default>
         {manufacturer_xml}
         <active><![CDATA[1]]></active>
+        <state><![CDATA[1]]></state>
         <reference><![CDATA[{product.x_studio_item_id}]]></reference>
         <ean13><![CDATA[]]></ean13>
         <price><![CDATA[{product.list_price:.2f}]]></price>
@@ -1250,22 +1251,22 @@ class ProductProductPrest(models.Model):
     @api.model
     def cron_monitor_stock_changes(self):
         """
-        Cron job function that runs every 5 minutes to monitor stock changes
+        Cron job function that monitors stock changes for today's date
         This is the main entry point for the scheduled action
         """
         try:
-            _logger.info("CRON: Starting stock change monitor")
+            _logger.info("CRON: Starting stock change monitor for today")
 
-            # Monitor stock move lines in the last 10 minutes
-            affected_products = self.get_products_from_stock_move_lines(minutes_ago=10)
+            # Monitor stock move lines from today
+            affected_products = self.get_products_from_stock_move_lines_today()
 
             if affected_products:
-                _logger.info(f"CRON: Found {len(affected_products)} affected products, creating queue jobs")
+                _logger.info(f"CRON: Found {len(affected_products)} affected products from today, creating queue jobs")
 
                 # Create background jobs for stock sync
                 self._create_stock_sync_jobs(affected_products)
             else:
-                _logger.info("CRON: No products affected by stock moves in the last 10 minutes")
+                _logger.info("CRON: No products affected by stock moves today")
 
         except Exception as e:
             _logger.error(f"CRON: Error in stock change monitor: {e}")
@@ -1277,22 +1278,23 @@ class ProductProductPrest(models.Model):
     @api.model
     def _create_stock_sync_jobs(self, affected_products):
         """Create queue jobs for stock synchronization in batches"""
-        BATCH_SIZE = 30  # Products per job
+        BATCH_SIZE = 50  # Increased from 30 to 50 products per job
 
         total_products = len(affected_products)
         total_batches = (total_products + BATCH_SIZE - 1) // BATCH_SIZE
 
-        _logger.info(f"Creating {total_batches} background jobs for {total_products} products")
+        _logger.info(
+            f"Creating {total_batches} background jobs for {total_products} products (batch size: {BATCH_SIZE})")
 
         for i in range(0, total_products, BATCH_SIZE):
             batch = affected_products[i:i + BATCH_SIZE]
 
             # Create a background job for this batch
             self.with_delay(
-                description=f"Sync PrestaShop Stock (Batch {(i // BATCH_SIZE) + 1}/{total_batches})"
+                description=f"Sync PrestaShop Stock (Batch {(i // BATCH_SIZE) + 1}/{total_batches} - {len(batch)} products)"
             )._job_sync_stock_batch(batch)
 
-        _logger.info(f"Created {total_batches} stock sync jobs")
+        _logger.info(f"Created {total_batches} stock sync jobs with {BATCH_SIZE} products per batch")
 
     # ==================== BACKGROUND JOB METHOD ====================
     @api.model
@@ -1479,32 +1481,39 @@ class ProductProductPrest(models.Model):
 
     # ==================== STOCK MONITORING ====================
     @api.model
-    def get_products_from_stock_move_lines(self, minutes_ago=10):
+    def get_products_from_stock_move_lines_today(self):
         """
-        Get products affected by stock move lines in the last X minutes
+        Get products affected by stock move lines from today
         Returns list of products with their current stock quantities
         """
-        # Calculate the time threshold
-        time_threshold = datetime.now() - timedelta(minutes=minutes_ago)
+        # Get today's date range (start and end of today)
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999)
 
-        # Search for stock move lines that were updated in the last X minutes
+        _logger.info(f"Searching for stock moves between {today_start} and {today_end}")
+
+        # Search for stock move lines that were created or updated today
         recent_move_lines = self.env['stock.move.line'].search([
             '|',
-            ('create_date', '>=', time_threshold),
-            ('write_date', '>=', time_threshold),
+            ('create_date', '>=', today_start),
+            ('write_date', '>=', today_start),
             ('product_id.default_code', '!=', False),
             ('product_id.default_code', '!=', ''),
             ('state', '=', 'done'),
         ], order='write_date desc')
 
         if not recent_move_lines:
-            _logger.info("No stock move lines found in the specified time period")
+            _logger.info("No stock move lines found for today")
             return []
+
+        _logger.info(f"Found {len(recent_move_lines)} stock move lines from today")
 
         # Get unique products from the move lines
         product_ids = set()
         for move_line in recent_move_lines:
             product_ids.add(move_line.product_id.id)
+
+        _logger.info(f"Identified {len(product_ids)} unique products from today's stock moves")
 
         # Get current stock quantities for these products
         affected_products = []
@@ -1523,15 +1532,13 @@ class ProductProductPrest(models.Model):
                     f"Current Stock: {product.qty_available}"
                 )
 
-        _logger.info(f"=== Found {len(affected_products)} products to sync ===")
+        _logger.info(f"=== Found {len(affected_products)} products to sync from today ===")
         return affected_products
 
     # ==================== UTILITY METHODS ====================
     @api.model
-    def log_stock_move_lines_for_product(self, ean13, minutes_ago=10):
+    def log_stock_move_lines_for_product(self, ean13, from_today=True):
         """Log stock move lines for a specific product by EAN13"""
-        time_threshold = datetime.now() - timedelta(minutes=minutes_ago)
-
         # Find the product
         product = self.env['product.product'].search([
             ('default_code', '=', ean13)
@@ -1541,16 +1548,29 @@ class ProductProductPrest(models.Model):
             _logger.info(f"Product with EAN13 {ean13} not found")
             return False
 
-        # Check recent move lines for this product
-        recent_move_lines = self.env['stock.move.line'].search([
-            ('product_id', '=', product.id),
-            '|',
-            ('create_date', '>=', time_threshold),
-            ('write_date', '>=', time_threshold),
-        ], order='write_date desc')
+        if from_today:
+            # Get today's date range
+            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            domain = [
+                ('product_id', '=', product.id),
+                '|',
+                ('create_date', '>=', today_start),
+                ('write_date', '>=', today_start),
+            ]
+            _logger.info(f"Searching move lines for {product.name} (EAN13: {ean13}) from today")
+        else:
+            # Get all move lines
+            domain = [('product_id', '=', product.id)]
+            _logger.info(f"Searching all move lines for {product.name} (EAN13: {ean13})")
+
+        # Check move lines for this product
+        recent_move_lines = self.env['stock.move.line'].search(
+            domain,
+            order='write_date desc'
+        )
 
         if recent_move_lines:
-            _logger.info(f"Recent move lines for {product.name} (EAN13: {ean13}):")
+            _logger.info(f"Found {len(recent_move_lines)} move lines for {product.name}:")
             for move_line in recent_move_lines:
                 _logger.info(
                     f"  - Qty: {move_line.qty_done} | "
@@ -1558,7 +1578,7 @@ class ProductProductPrest(models.Model):
                 )
                 _logger.info(f"    Date: {move_line.write_date} | State: {move_line.state}")
         else:
-            _logger.info("No recent move lines found for this product")
+            _logger.info("No move lines found for this product")
 
         return True
 
@@ -1993,15 +2013,10 @@ class WebsiteOrder(models.Model):
 
     def action_create_batch_sale_orders_dynamic(self):
         """
-        Create sale orders from website orders.
-        - Remove maximum quantity restriction.
-        - Keep the same batch number for all orders processed in this run.
-        - Do NOT create stock picking batches.
+        Create and confirm sale orders ONLY for selected website orders
+        having status = 'en_cours_de_traitement'.
         """
-        # Get all orders with status 'en_cours_traitement' ordered by date
-        orders_to_process = self.search([
-            ('status', '=', 'en_cours_traitement')
-        ], order='date_commande, id')
+        orders_to_process = self.filtered(lambda o: o.status == 'en_cours_traitement')
 
         if not orders_to_process:
             return {
@@ -2009,128 +2024,85 @@ class WebsiteOrder(models.Model):
                 'tag': 'display_notification',
                 'params': {
                     'title': 'Info',
-                    'message': 'Aucune commande à traiter.',
-                    'type': 'info'
+                    'message': 'Aucune commande sélectionnée avec le statut "En cours de traitement".',
+                    'type': 'warning'
                 }
             }
 
-        batches_created = 0
-        processed_ids = []
+        processed = 0
 
-        _logger.info(f"Starting processing {len(orders_to_process)} website orders")
-
-        # Main loop: process each order
         for order in orders_to_process:
-            if order.id in processed_ids:
-                continue
-
-            self._create_sale_orders_for_batch([order])
-            processed_ids.append(order.id)
-            batches_created += 1
-
-        final_message = (
-            f'{batches_created} batch(es) traité(s)<br/>'
-            f'{len(processed_ids)}/{len(orders_to_process)} commandes traitées'
-        )
-
-        _logger.info(f"Website order processing completed: {batches_created} batch(es)")
+            self._create_and_confirm_sale_order(order)
+            processed += 1
 
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
-                'title': 'Traitement Terminé',
-                'message': final_message,
+                'title': 'Succès',
+                'message': f'{processed} commande(s) traitée(s) avec succès.',
                 'type': 'success',
                 'sticky': True
             }
         }
-    def _create_sale_orders_for_batch(self, orders):
-        """Create sale orders for a batch of website orders without picking batch"""
-        if not orders:
-            return
 
-        # Generate batch number (keep same for all orders in this call)
-        batch_number = self._get_next_batch_number()
-        _logger.info(f"Creating sale orders for batch {batch_number} with {len(orders)} order(s)")
+    def _create_and_confirm_sale_order(self, order):
+        """Create and confirm a sale order from ONE website order"""
 
-        for order in orders:
-            # Find or create partner
-            partner = self.env['res.partner'].search([('name', 'ilike', order.client_name)], limit=1)
-            if not partner:
-                partner = self.env['res.partner'].create({
-                    'name': order.client_name or "Client Website",
-                    'email': order.email or False,
-                    'phone': order.phone or order.mobile or False,
-                    'street': order.adresse or '',
-                    'street2': order.second_adresse or '',
-                    'city': order.city or '',
-                    'zip': order.postcode or '',
-                })
-                _logger.info(f"New partner created: {partner.name}")
+        # Find or create partner
+        partner = self.env['res.partner'].search(
+            [('name', 'ilike', order.client_name)], limit=1
+        )
 
-            # Create sale order
-            sale_order_vals = {
-                'partner_id': partner.id,
-                'date_order': order.date_commande or fields.Datetime.now(),
-                'client_order_ref': order.reference,
-                'origin': f"{order.reference or order.ticket_id} - Batch: {batch_number}",
-                'note': f"Commande Website\nRéférence: {order.reference or order.ticket_id}\nBatch: {batch_number}",
-            }
+        if not partner:
+            partner = self.env['res.partner'].create({
+                'name': order.client_name or "Client Website",
+                'email': order.email or False,
+                'phone': order.phone or order.mobile or False,
+                'street': order.adresse or '',
+                'street2': order.second_adresse or '',
+                'city': order.city or '',
+                'zip': order.postcode or '',
+            })
 
-            sale_order = self.env['sale.order'].create(sale_order_vals)
-            _logger.info(f"Sale order {sale_order.name} created for website order {order.ticket_id}")
+        # Create sale order
+        sale_order = self.env['sale.order'].create({
+            'partner_id': partner.id,
+            'date_order': order.date_commande or fields.Datetime.now(),
+            'client_order_ref': order.reference,
+            'origin': order.reference or order.ticket_id,
+            'note': f"Commande Website\nRéférence: {order.reference or order.ticket_id}",
+        })
 
-            # Create order lines
-            for line in order.line_ids:
-                if not line.product_id:
-                    _logger.warning(f"Product missing for line (Barcode: {line.code_barre})")
-                    continue
+        # Create sale order lines
+        for line in order.line_ids:
+            if not line.product_id:
+                _logger.warning(
+                    f"Produit manquant pour la ligne (Barcode: {line.code_barre})"
+                )
+                continue
 
-                line_vals = {
-                    'order_id': sale_order.id,
-                    'product_id': line.product_id.id,
-                    'product_uom_qty': line.quantity,
-                    'price_unit': line.price,
-                    'discount': line.discount if hasattr(line, 'discount') else 0,
-                }
-                self.env['sale.order.line'].create(line_vals)
+            self.env['sale.order.line'].create({
+                'order_id': sale_order.id,
+                'product_id': line.product_id.id,
+                'product_uom_qty': line.quantity,
+                'price_unit': line.price,
+                'discount': getattr(line, 'discount', 0),
+            })
 
-            # Confirm the sale order
-            try:
-                sale_order.action_confirm()
-                _logger.info(f"Sale order {sale_order.name} confirmed successfully")
-            except Exception as e:
-                _logger.error(f"Error confirming sale order {sale_order.name}: {str(e)}")
+        # Confirm sale order
+        sale_order.action_confirm()
 
-            # Update website order status, batch number and link to sale order
-            try:
-                order.write({
-                    'status': 'en_cours_preparation',
-                    'batch_number': batch_number,
-                    'sale_order_id': sale_order.id,
-                    'sale_order_ref': sale_order.name or False,
-                })
-            except Exception as e:
-                _logger.exception(f"Failed to write sale_order_id for website order {order.id}: {e}")
-                order.write({
-                    'status': 'en_cours_preparation',
-                    'batch_number': batch_number,
-                    'sale_order_ref': sale_order.name or False,
-                    'sale_order_id': False,
-                })
+        # Update website order
+        order.write({
+            'status': 'en_cours_preparation',
+            'sale_order_id': sale_order.id,
+            'sale_order_ref': sale_order.name,
+        })
 
-            # Post message in chatter
-            '''
-            order.message_post(
-                body=f"Commande de vente créée: {sale_order.name}<br/>"
-                     f"Batch: {batch_number}<br/>"
-                     f"Quantité totale: {order.total_qty}"
-            )
-            '''
-            _logger.info(
-                f"Website order {order.ticket_id} updated - Status: en_cours_preparation, Batch: {batch_number}"
-            )
+        _logger.info(
+            f"Website order {order.ticket_id} → Sale order {sale_order.name} confirmed"
+        )
 
     '''
     def action_create_batch_sale_orders_dynamic(self):
@@ -2854,7 +2826,6 @@ class CustomerFetcher(models.TransientModel):
             _logger.exception("EXCEPTION: %s", str(e))
 
         _logger.info("Order data fetch completed")
-
     def _fetch_and_log_order_details(self, order_id):
         order_url = f"{self.API_BASE_URL}/orders/{order_id}"
         try:
@@ -2944,7 +2915,6 @@ class CustomerFetcher(models.TransientModel):
                 _logger.error("Failed to fetch order details for %s, status code: %s", order_id, response.status_code)
         except Exception as e:
             _logger.exception("Exception fetching details for order %s: %s", order_id, str(e))
-
     def _get_complete_customer_details(self, customer_url, address_url):
         """Fetch complete customer details including address information"""
         customer_details = {}
@@ -2987,7 +2957,7 @@ class CustomerFetcher(models.TransientModel):
                             customer_details['country'] = country_name
 
         return customer_details
-
+ 
     def _fetch_api_data(self, url):
         """Helper method to fetch data from API"""
         try:
