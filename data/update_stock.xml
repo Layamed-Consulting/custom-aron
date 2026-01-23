@@ -6,7 +6,7 @@
             <field name="model_id" ref="product.model_product_product"/>
             <field name="state">code</field>
             <field name="code">model.cron_monitor_stock_changes()</field>
-            <field name="interval_number">5</field>
+            <field name="interval_number">10</field>
             <field name="interval_type">minutes</field>
             <field name="numbercall">-1</field>
             <field name="active">True</field>
