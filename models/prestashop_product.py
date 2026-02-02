@@ -1713,6 +1713,7 @@ class WebsiteOrder(models.Model):
         readonly=True,
         help="Nom / référence du bon de commande (copie textuelle pour affichage sécurisé)"
     )
+    medafrica_status = fields.Char(string="Medafrica Status", readonly=True)
     BASE_URL = "https://outletna.com/api"
     WS_KEY = "86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N"
 
@@ -2738,6 +2739,174 @@ class WebsiteOrder(models.Model):
 
         return True
 
+    @api.model
+    def cron_update_medafrica_tracking_status(self):
+        """
+        Cron job to update Medafrica tracking status for orders in delivery
+        Runs periodically to check shipment status from Medafrica API
+        """
+        try:
+            _logger.info("=== CRON: Starting Medafrica Tracking Status Update ===")
+
+            # Get all orders with status 'en_cours_de_livraison' and have shipment_number
+            orders_to_track = self.search([
+                ('status', '=', 'en_cours_de_livraison'),
+                ('shipment_number', '!=', False),
+                ('shipment_number', '!=', ''),
+            ])
+
+            if not orders_to_track:
+                _logger.info("CRON: No orders in delivery status with tracking numbers")
+                return True
+
+            _logger.info(f"CRON: Found {len(orders_to_track)} orders to track")
+
+            # Process each order
+            success_count = 0
+            failed_count = 0
+
+            for order in orders_to_track:
+                try:
+                    tracking_updated = self._update_order_tracking_status(order)
+                    if tracking_updated:
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                except Exception as e:
+                    failed_count += 1
+                    _logger.error(f"CRON: Error tracking order {order.ticket_id}: {e}")
+
+            _logger.info(
+                f"CRON: Tracking update completed - Success: {success_count}, "
+                f"Failed: {failed_count}"
+            )
+
+        except Exception as e:
+            _logger.error(f"CRON: Error in Medafrica tracking update: {e}")
+
+        _logger.info("=== CRON: Medafrica Tracking Status Update Completed ===")
+        return True
+
+    @api.model
+    def _update_order_tracking_status(self, order):
+        """
+        Update tracking status for a specific order
+        Returns True if successful, False otherwise
+        """
+        if not order.shipment_number:
+            _logger.warning(f"Order {order.ticket_id} has no shipment number")
+            return False
+
+        _logger.info(f"Tracking order {order.ticket_id} with shipment number: {order.shipment_number}")
+
+        # Get tracking information from Medafrica API
+        tracking_data = self._get_medafrica_tracking(order.shipment_number)
+
+        if not tracking_data:
+            _logger.warning(f"No tracking data received for order {order.ticket_id}")
+            return False
+
+        # Extract the latest tracking event
+        latest_event = self._extract_latest_tracking_event(tracking_data)
+
+        if not latest_event:
+            _logger.warning(f"No tracking events found for order {order.ticket_id}")
+            return False
+
+        # Update order with the tracking status
+        order.write({
+            'medafrica_status': latest_event
+        })
+
+        _logger.info(
+            f"✔ Successfully updated tracking status for order {order.ticket_id}: "
+            f"{latest_event}"
+        )
+
+        return True
+
+    @api.model
+    def _get_medafrica_tracking(self, tracking_number):
+        """
+        Call Medafrica API to get tracking information
+        Returns parsed JSON data or None if failed
+        """
+        try:
+            API_URL = "https://api.postshipping.com/api2/tracks"
+            API_TOKEN = "59C06979726533CE60394C812071EE03"
+
+            # Prepare headers
+            headers = {
+                'Content-Type': 'application/json',
+                'Token': '59C06979726533CE60394C812071EE03'
+            }
+
+            # Prepare URL with tracking number
+            url = f"{API_URL}?ReferenceNumber={tracking_number}"
+
+            _logger.info(f"Calling Medafrica API: {url}")
+
+            # Make GET request
+            response = requests.get(url, headers=headers, timeout=30)
+
+            if response.status_code == 200:
+                tracking_data = response.json()
+                _logger.info(f"Received tracking data for {tracking_number}")
+                return tracking_data
+            else:
+                _logger.warning(
+                    f"Medafrica API returned status {response.status_code} "
+                    f"for tracking number {tracking_number}"
+                )
+                return None
+
+        except requests.exceptions.Timeout:
+            _logger.error(f"Timeout while calling Medafrica API for {tracking_number}")
+            return None
+        except requests.exceptions.RequestException as e:
+            _logger.error(f"Request error calling Medafrica API: {e}")
+            return None
+        except json.JSONDecodeError as e:
+            _logger.error(f"Error parsing JSON response from Medafrica API: {e}")
+            return None
+        except Exception as e:
+            _logger.error(f"Unexpected error calling Medafrica API: {e}")
+            return None
+
+    @api.model
+    def _extract_latest_tracking_event(self, tracking_data):
+        """
+        Extract the latest tracking event name from the API response
+        Returns the TrackingEventName of the most recent event
+        """
+        try:
+            # Check if TrackingDetail exists and is a list
+            if 'TrackingDetail' not in tracking_data:
+                _logger.warning("No TrackingDetail in response")
+                return None
+
+            tracking_details = tracking_data['TrackingDetail']
+
+            if not tracking_details or not isinstance(tracking_details, list):
+                _logger.warning("TrackingDetail is empty or not a list")
+                return None
+
+            # Get the last event (most recent based on API structure)
+            # Assuming the API returns events in chronological order
+            latest_event = tracking_details[-1]
+
+            tracking_event_name = latest_event.get('TrackingEventName', '')
+
+            if not tracking_event_name:
+                _logger.warning("TrackingEventName is empty in latest event")
+                return None
+
+            _logger.info(f"Latest tracking event: {tracking_event_name}")
+            return tracking_event_name
+
+        except Exception as e:
+            _logger.error(f"Error extracting tracking event: {e}")
+            return None
 class StockWebsiteOrderLine(models.Model):
     _name = 'stock.website.order.line'
     _description = 'Ligne de commande du site'

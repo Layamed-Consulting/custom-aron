@@ -27,6 +27,7 @@
                        decoration-bf="status == 'delivered'"
                        decoration-danger="status == 'annuler'"
                 />
+                <field name="medafrica_status" />
             </tree>
         </field>
     </record>

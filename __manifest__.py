@@ -21,6 +21,7 @@
         'views/generate_batch.xml',
         'security/ir.model.access.csv',
         'data/cron.xml',
+        'data/med_africa_status.xml',
         'data/fetch.xml',
         'data/cron_variante.xml',
         'data/update_stock.xml',
