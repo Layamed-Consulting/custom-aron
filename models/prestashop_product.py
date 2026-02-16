@@ -1714,6 +1714,7 @@ class WebsiteOrder(models.Model):
         help="Nom / référence du bon de commande (copie textuelle pour affichage sécurisé)"
     )
     medafrica_status = fields.Char(string="Medafrica Status", readonly=True)
+    colis_destination = fields.Char(string="Colis - Troli", readonly=True, tracking=True)
     BASE_URL = "https://outletna.com/api"
     WS_KEY = "86TN4NX1QDTBJC2XS9HUHL9RI53ANB3N"
 
@@ -2409,9 +2410,10 @@ class WebsiteOrder(models.Model):
         return batch
     '''
     '''pour depoloiement'''
+
     @api.model
     def cron_check_sale_order_ref_status(self):
-        """Cron to check status in stock picking model."""
+        """Cron to check status in stock picking model and get package destination."""
 
         # Only take orders in 'en_cours_preparation'
         orders = self.search([
@@ -2426,6 +2428,8 @@ class WebsiteOrder(models.Model):
         _logger.info(f"[CRON] Checking status for {len(orders)} orders...")
 
         Picking = self.env['stock.picking']
+        PickingBatch = self.env['stock.picking.batch']
+        StockMoveLine = self.env['stock.move.line']
 
         for order in orders:
             picking = Picking.search([
@@ -2436,9 +2440,57 @@ class WebsiteOrder(models.Model):
                 _logger.info(f"[CRON] No picking found for order {order.sale_order_ref}")
                 continue
 
+            # Get picking name and batch_id
+            picking_name = picking.name
+            batch_id = picking.batch_id
+
+            _logger.info(f"[CRON] Order {order.ticket_id}: picking name={picking_name}, batch_id={batch_id}")
+
+            # If batch_id exists, search for package in stock.move.line
+            if batch_id:
+                # Search stock.picking.batch by batch_id
+                picking_batch = PickingBatch.search([
+                    ('name', 'ilike', batch_id.name)
+                ], limit=1)
+
+                if picking_batch:
+                    _logger.info(f"[CRON] Found batch: {picking_batch.name}")
+
+                    # Search stock.move.line with picking_id matching our picking name
+                    move_lines = StockMoveLine.search([
+                        ('picking_id', '=', picking.id),
+                        ('result_package_id', '!=', False)
+                    ])
+
+                    if move_lines:
+                        # Collect all unique package names
+                        package_names = []
+                        for move_line in move_lines:
+                            if move_line.result_package_id and move_line.result_package_id.name:
+                                package_name = move_line.result_package_id.name
+                                if package_name not in package_names:
+                                    package_names.append(package_name)
+
+                        if package_names:
+                            # Join all package names with comma separator
+                            colis_value = ', '.join(package_names)
+                            order.colis_destination = colis_value
+                            _logger.info(
+                                f"[CRON] Order {order.ticket_id}: colis_destination set to {colis_value} ({len(package_names)} packages)"
+                            )
+                        else:
+                            _logger.info(f"[CRON] Order {order.ticket_id}: No package names found")
+                    else:
+                        _logger.info(
+                            f"[CRON] Order {order.ticket_id}: No move lines with result_package_id found"
+                        )
+                else:
+                    _logger.info(f"[CRON] No batch found for batch_id: {batch_id.name}")
+            else:
+                _logger.info(f"[CRON] Order {order.ticket_id}: No batch_id in picking")
+
             # If picking is done → only update orders that are still in en_cours_preparation
             if picking.state == 'done':
-
                 if order.status == 'en_cours_preparation':
                     order.status = 'commande_prepare'
                     _logger.info(
@@ -2449,7 +2501,6 @@ class WebsiteOrder(models.Model):
                     _logger.info(
                         f"[CRON] Order {order.ticket_id} picking done but status is '{order.status}', not updated."
                     )
-
             else:
                 _logger.info(
                     f"[CRON] Order {order.ticket_id} still not ready (picking state: {picking.state})"
