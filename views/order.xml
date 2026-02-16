@@ -18,6 +18,7 @@
                 <field name="payment_method"/>
                 <field name="total_qty"/>
                 <field name="batch_number"/>
+                <field name="colis_destination"/>
                 <field name="sale_order_ref" string="Ref. Bon de Commande"/>
                 <field name="status"
                        widget="badge"
@@ -128,6 +129,7 @@
                         <field name="status"/>
                         <field name="reference"/>
                         <field name="date_commande"/>
+                        <field name="colis_destination"/>
                         <field name="batch_number"/>
                     </group>
                     <group>
