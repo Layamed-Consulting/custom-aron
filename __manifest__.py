@@ -30,6 +30,7 @@
         'data/invoice.xml',
         'data/shipping_number.xml',
         'data/sync_status_to_prestashop.xml',
+        'data/invoice_update_name.xml',
     ],
     'installable': True,
     'application': True,
