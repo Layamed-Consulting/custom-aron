@@ -2958,6 +2958,102 @@ class WebsiteOrder(models.Model):
         except Exception as e:
             _logger.error(f"Error extracting tracking event: {e}")
             return None
+
+    @api.model
+    def cron_update_invoice_names(self):
+        """Cron to fetch invoice IDs from PrestaShop and update invoice names in Odoo"""
+        _logger.info("[CRON INVOICE] Starting invoice name update process...")
+
+        # Get orders in 'en_cours_de_livraison' status
+        orders = self.search([
+            ('status', '=', 'en_cours_de_livraison'),
+            ('reference', '!=', False),
+            ('ticket_id', '!=', False),
+        ])
+
+        if not orders:
+            _logger.info("[CRON INVOICE] No orders found in 'en_cours_de_livraison' status")
+            return True
+
+        _logger.info(f"[CRON INVOICE] Found {len(orders)} orders to process")
+
+        AccountMove = self.env['account.move']
+        updated_count = 0
+        error_count = 0
+
+        for order in orders:
+            try:
+                # Get the order ID (ticket_id is the PrestaShop order ID)
+                prestashop_order_id = order.ticket_id
+
+                # Call PrestaShop API to get invoice ID
+                api_url = f"{self.BASE_URL}/order_invoices?filter[id_order]={prestashop_order_id}"
+
+                _logger.info(f"[CRON INVOICE] Fetching invoice for order {prestashop_order_id}: {api_url}")
+
+                response = requests.get(
+                    api_url,
+                    auth=(self.WS_KEY, ""),
+                    timeout=30
+                )
+
+                if response.status_code == 200:
+                    # Parse XML response
+                    root = ET.fromstring(response.content)
+                    invoice_elem = root.find('.//order_invoice')
+
+                    if invoice_elem is not None:
+                        invoice_id = invoice_elem.get('id')
+
+                        if invoice_id:
+                            _logger.info(
+                                f"[CRON INVOICE] Found invoice ID {invoice_id} for order {prestashop_order_id}")
+
+                            # Search for invoice in account.move by reference
+                            invoice = AccountMove.search([
+                                ('ref', 'ilike', order.reference),
+                                ('move_type', '=', 'out_invoice'),
+                            ], limit=1)
+
+                            if invoice:
+                                # Generate new invoice name: IN + 6 digits (e.g., IN000039, IN000135)
+                                new_invoice_name = f"IN{invoice_id.zfill(6)}"
+
+                                # Update the invoice name
+                                invoice.write({'name': new_invoice_name})
+
+                                _logger.info(
+                                    f"[CRON INVOICE] Updated invoice {invoice.id} name to {new_invoice_name} "
+                                    f"for order reference {order.reference}"
+                                )
+                                updated_count += 1
+                            else:
+                                _logger.warning(
+                                    f"[CRON INVOICE] No invoice found in account.move for reference {order.reference}"
+                                )
+                        else:
+                            _logger.warning(f"[CRON INVOICE] No invoice ID in response for order {prestashop_order_id}")
+                    else:
+                        _logger.warning(f"[CRON INVOICE] No invoice element found for order {prestashop_order_id}")
+                else:
+                    _logger.error(
+                        f"[CRON INVOICE] API request failed for order {prestashop_order_id}: "
+                        f"{response.status_code} - {response.text}"
+                    )
+                    error_count += 1
+
+            except Exception as e:
+                error_count += 1
+                _logger.error(
+                    f"[CRON INVOICE] Exception processing order {order.reference}: {str(e)}",
+                    exc_info=True
+                )
+
+        _logger.info(
+            f"[CRON INVOICE] Process completed. Updated: {updated_count}, Errors: {error_count}, Total: {len(orders)}"
+        )
+
+        return True
 class StockWebsiteOrderLine(models.Model):
     _name = 'stock.website.order.line'
     _description = 'Ligne de commande du site'
