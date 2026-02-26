@@ -8,6 +8,7 @@ import json
 import xml.etree.ElementTree as ET
 from lxml import etree
 import logging
+from collections import defaultdict
 _logger = logging.getLogger(__name__)
 
 
@@ -2012,12 +2013,232 @@ class WebsiteOrder(models.Model):
             "url": tracking_url,
             "target": "new",
         }
-
     def action_create_batch_sale_orders_dynamic(self):
         """
         Create and confirm sale orders ONLY for selected website orders
         having status = 'en_cours_de_traitement'.
+        Split by warehouse if products come from different warehouses.
         """
+        orders_to_process = self.filtered(lambda o: o.status == 'en_cours_traitement')
+
+        if not orders_to_process:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Info',
+                    'message': 'Aucune commande sélectionnée avec le statut "En cours de traitement".',
+                    'type': 'warning'
+                }
+            }
+
+        processed = 0
+        total_sale_orders = 0
+
+        for order in orders_to_process:
+            sale_orders_created = self._create_and_confirm_sale_orders_by_warehouse(order)
+            if sale_orders_created:
+                processed += 1
+                total_sale_orders += sale_orders_created
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Succès',
+                'message': f'{processed} commande(s) traitée(s) avec succès.\n{total_sale_orders} commande(s) de vente créée(s).',
+                'type': 'success',
+                'sticky': True
+            }
+        }
+
+    def _create_and_confirm_sale_orders_by_warehouse(self, order):
+        """
+        Create and confirm sale orders from ONE website order.
+        SPLIT by warehouse if products are in different warehouses.
+        Returns number of sale orders created.
+        """
+
+        # Find or create partner
+        partner = self.env['res.partner'].search(
+            [('name', 'ilike', order.client_name)], limit=1
+        )
+
+        if not partner:
+            partner = self.env['res.partner'].create({
+                'name': order.client_name or "Client Website",
+                'email': order.email or False,
+                'phone': order.phone or order.mobile or False,
+                'street': order.adresse or '',
+                'street2': order.second_adresse or '',
+                'city': order.city or '',
+                'zip': order.postcode or '',
+            })
+
+        # Group lines by warehouse
+        lines_by_warehouse = self._group_lines_by_warehouse(order.line_ids)
+
+        if not lines_by_warehouse:
+            _logger.warning(f"No lines to process for order {order.ticket_id}")
+            return 0
+
+        sale_orders_created = []
+
+        # Create one sale order per warehouse
+        for warehouse, lines in lines_by_warehouse.items():
+            if not lines:
+                continue
+
+            warehouse_name = warehouse.name if warehouse else "Sans entrepôt"
+            _logger.info(f"Creating sale order for warehouse: {warehouse_name} with {len(lines)} line(s)")
+
+            # Create sale order with warehouse
+            sale_order_vals = {
+                'partner_id': partner.id,
+                'date_order': order.date_commande or fields.Datetime.now(),
+                'client_order_ref': order.reference,
+                'origin': f"{order.reference or order.ticket_id} - {warehouse_name}",
+                'note': f"Commande Website\nRéférence: {order.reference or order.ticket_id}\nEntrepôt: {warehouse_name}",
+            }
+
+            # Set warehouse_id if warehouse exists
+            if warehouse:
+                sale_order_vals['warehouse_id'] = warehouse.id
+
+            sale_order = self.env['sale.order'].create(sale_order_vals)
+
+            # Create sale order lines
+            for line in lines:
+                if not line.product_id:
+                    _logger.warning(f"Produit manquant pour la ligne (Barcode: {line.code_barre})")
+                    continue
+
+                self.env['sale.order.line'].create({
+                    'order_id': sale_order.id,
+                    'product_id': line.product_id.id,
+                    'product_uom_qty': line.quantity,
+                    'price_unit': line.price,
+                    'discount': line.discount or 0,
+                })
+
+            # Confirm sale order
+            try:
+                sale_order.action_confirm()
+                sale_orders_created.append(sale_order.name)
+                _logger.info(f"Sale order {sale_order.name} confirmed for warehouse {warehouse_name}")
+            except Exception as e:
+                _logger.error(f"Failed to confirm sale order for warehouse {warehouse_name}: {str(e)}")
+                continue
+
+        # Update website order status
+        if sale_orders_created:
+            order.write({
+                'status': 'en_cours_preparation',
+            })
+
+            # Post message with all sale orders created
+            order.message_post(
+                body=f"Commande traitée avec succès!<br/>"
+                     f"Nombre de commandes de vente créées: {len(sale_orders_created)}<br/>"
+                     f"Références: {', '.join(sale_orders_created)}"
+            )
+
+            _logger.info(
+                f"Website order {order.ticket_id} → {len(sale_orders_created)} sale order(s) created: {', '.join(sale_orders_created)}")
+
+        return len(sale_orders_created)
+
+    def _group_lines_by_warehouse(self, lines):
+        """
+        Group order lines by warehouse based on warehouse_availability field.
+
+        Returns: dict {warehouse_record: [lines]}
+        """
+        lines_by_warehouse = defaultdict(list)
+
+        for line in lines:
+            if not line.warehouse_availability or line.warehouse_availability == "Aucun stock":
+                _logger.warning(f"Line {line.product_name} has no warehouse availability")
+                # Group lines without warehouse together
+                lines_by_warehouse[None].append(line)
+                continue
+
+            # Extract warehouse name from warehouse_availability
+            # Format: "WH-MA / Stock / Location" or "Aronia - MA / WH-MA/Stock"
+            warehouse_code = self._extract_warehouse_code(line.warehouse_availability)
+
+            if not warehouse_code:
+                _logger.warning(f"Could not extract warehouse code from: {line.warehouse_availability}")
+                lines_by_warehouse[None].append(line)
+                continue
+
+            # Find warehouse by code or name
+            warehouse = self._find_warehouse_by_code(warehouse_code)
+
+            if warehouse:
+                lines_by_warehouse[warehouse].append(line)
+                _logger.info(f"Line {line.product_name} assigned to warehouse: {warehouse.name}")
+            else:
+                _logger.warning(f"Warehouse not found for code: {warehouse_code}")
+                lines_by_warehouse[None].append(line)
+
+        return dict(lines_by_warehouse)
+
+    def _extract_warehouse_code(self, warehouse_availability):
+        """
+        Extract warehouse identifier dynamically from warehouse_availability string.
+
+        """
+        if not warehouse_availability:
+            return None
+
+        # Split by "/"
+        parts = warehouse_availability.split('/')
+        if not parts:
+            return None
+
+        # Always take first part dynamically
+        warehouse_identifier = parts[0].strip()
+
+        return warehouse_identifier if warehouse_identifier else None
+
+    def _find_warehouse_by_code(self, warehouse_code):
+        """
+        Find warehouse by code or name.
+
+        Search priority:
+        1. By exact code match
+        2. By name containing the code
+        """
+        if not warehouse_code:
+            return None
+
+        # Try exact match on code field
+        warehouse = self.env['stock.warehouse'].search([
+            ('code', '=', warehouse_code)
+        ], limit=1)
+
+        if warehouse:
+            return warehouse
+
+        # Try partial match on name
+        warehouse = self.env['stock.warehouse'].search([
+            ('name', 'ilike', warehouse_code)
+        ], limit=1)
+
+        if warehouse:
+            return warehouse
+
+        # Try partial match on code
+        warehouse = self.env['stock.warehouse'].search([
+            ('code', 'ilike', warehouse_code)
+        ], limit=1)
+
+        return warehouse
+
+    '''
+    def action_create_batch_sale_orders_dynamic(self):
+
         orders_to_process = self.filtered(lambda o: o.status == 'en_cours_traitement')
 
         if not orders_to_process:
@@ -2049,7 +2270,6 @@ class WebsiteOrder(models.Model):
         }
 
     def _create_and_confirm_sale_order(self, order):
-        """Create and confirm a sale order from ONE website order"""
 
         # Find or create partner
         partner = self.env['res.partner'].search(
@@ -2105,7 +2325,7 @@ class WebsiteOrder(models.Model):
         _logger.info(
             f"Website order {order.ticket_id} → Sale order {sale_order.name} confirmed"
         )
-
+    '''
     '''
     def action_create_batch_sale_orders_dynamic(self):
         """
@@ -3079,6 +3299,74 @@ class StockWebsiteOrderLine(models.Model):
         ('annuler', 'Annulé')
     ], string="Statut", default='initial')
 
+    warehouse_availability = fields.Char(
+        string="Emplacement Entrepôt",
+        help="Nom de l'emplacement où le produit est disponible"
+    )
+
+    stock_qty = fields.Float(
+        string="Stock Disponible",
+        help="Quantité disponible en stock"
+    )
+
+    def set_warehouse_location(self):
+        """Set warehouse location for this line - Called from API import only"""
+        self.ensure_one()
+
+        if not self.product_id:
+            self.warehouse_availability = "Produit non trouvé"
+            self.stock_qty = 0
+            return
+
+        # Get all warehouses ordered by sequence (respects drag & drop order)
+        warehouses = self.env['stock.warehouse'].search([], order='sequence, id')
+
+        if not warehouses:
+            _logger.warning(" No warehouses configured in system")
+            self.warehouse_availability = "Aucun entrepôt configuré"
+            self.stock_qty = 0
+            return
+
+        # Check each warehouse in order until we find stock
+        for warehouse in warehouses:
+            # Search stock in this specific warehouse
+            stock_quants = self.env['stock.quant'].search([
+                ('product_id', '=', self.product_id.id),
+                ('location_id.warehouse_id', '=', warehouse.id),
+                ('location_id.usage', '=', 'internal'),
+                ('quantity', '>', 0)
+            ], order='quantity desc', limit=1)
+
+            if stock_quants:
+                # Found stock in this warehouse!
+                quant = stock_quants[0]
+                location = quant.location_id
+
+                # Build location path
+                location_name = location.complete_name or location.name
+
+                self.warehouse_availability = f"{warehouse.name} / {location_name}"
+
+                # Calculate total stock in this warehouse
+                all_quants_in_warehouse = self.env['stock.quant'].search([
+                    ('product_id', '=', self.product_id.id),
+                    ('location_id.warehouse_id', '=', warehouse.id),
+                    ('location_id.usage', '=', 'internal'),
+                ])
+                self.stock_qty = sum(all_quants_in_warehouse.mapped('quantity'))
+
+                _logger.info(
+                    f"Product {self.product_id.name} found in FIRST available warehouse: {warehouse.name} - {location_name} (Qty: {self.stock_qty})")
+                return  # Stop here, we found stock in priority warehouse
+            else:
+                _logger.info(f"No stock in {warehouse.name}, checking next warehouse...")
+
+        # No stock found in any warehouse
+        self.warehouse_availability = "Aucun stock"
+        self.stock_qty = 0
+        _logger.warning(
+            f"No stock found for product: {self.product_id.name} (Barcode: {self.code_barre}) in any warehouse")
+
 class CustomerFetcher(models.TransientModel):
     _name = 'customer.fetch'
     _description = 'Customer Data Fetcher'
@@ -3205,6 +3493,18 @@ class CustomerFetcher(models.TransientModel):
                         _logger.warning("No product found with reference: %s", product_reference)
                         continue
 
+                    line = self.env['stock.website.order.line'].create({
+                        'order_id': order_rec.id,
+                        'product_id': product.id,
+                        'code_barre': product_reference,
+                        'product_name': product.name,
+                        'price': unit_price_incl,
+                        'quantity': float(quantity),
+                        'discount': float(row.findtext('total_discounts', default='0.00')),
+                    })
+                    # Set warehouse location for this specific line
+                    line.set_warehouse_location()
+                    '''26-02
                     self.env['stock.website.order.line'].create({
                         'order_id': order_rec.id,
                         'product_id': product.id,
@@ -3214,7 +3514,7 @@ class CustomerFetcher(models.TransientModel):
                         'quantity': float(quantity),
                         'discount': float(row.findtext('total_discounts', default='0.00')),
                     })
-
+                    '''
                 total_paid = order.findtext('total_paid_tax_incl', default='0.00')
                 payment_method = order.findtext('payment', default='')
 
