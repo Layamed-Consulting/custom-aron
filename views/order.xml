@@ -130,7 +130,8 @@
                         <field name="reference"/>
                         <field name="date_commande"/>
                         <field name="colis_destination"/>
-                        <field name="batch_number"/>
+                        <!--
+                        <field name="batch_number"/> -->
                     </group>
                     <group>
                         <field name="shipment_created" invisible="1"/>
@@ -161,7 +162,11 @@
                             <tree editable="false" class="oe_order_line_table">
                                 <field name="product_id"/>
                                 <field name="code_barre" readonly="1"/>
-                                <field name="stock_count" readonly="1"/>
+                                <field name="warehouse_availability" string="Emplacement Stock"/>
+                                <field name="stock_qty" string="Stock Dispo"/>
+                                <!--
+                                <field name="stock_count" readonly="1"/> -->
+
                                 <field name="product_name"/>
                                 <field name="quantity"/>
                                 <field name="price"/>
