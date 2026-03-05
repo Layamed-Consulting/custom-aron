@@ -95,13 +95,26 @@
                         class="btn-success"
                         invisible="shipment_created or status not in 'ready_to_delivery'"/>
 
-                <!-- Button to print label - only visible when shipment is created -->
+                <button name="action_print_label"
+                        string="Etiquette Espagne"
+                        type="object"
+                        class="btn-info"
+                        invisible="not shipment_created"
+                        icon="fa-print"/>
+
+                <button name="action_print_label_2"
+                        string="Etiquette Maroc"
+                        type="object"
+                        class="btn-info"
+                        invisible="not shipment_number_2"
+                        icon="fa-print"/>
+                <!-- Button to print label - only visible when shipment is created
                 <button name="action_print_label"
                         string="Print Label"
                         type="object"
                         class="btn-info"
                         invisible="not shipment_created"
-                        icon="fa-print"/>
+                        icon="fa-print"/>-->
 
                 <!--
                 <field name="status" widget="statusbar"
@@ -182,6 +195,7 @@
                         <group>
                             <group string="Détails du Colis">
                                 <field name="shipment_number" readonly="1"/>
+                                <field name="shipment_number_2"/>
                                 <!-- <field name="label_url" readonly="1" widget="url"/> -->
                             </group>
                             <!--

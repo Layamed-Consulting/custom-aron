@@ -1689,6 +1689,12 @@ class WebsiteOrder(models.Model):
         tracking=True,
         help="Numéro de suivi du colis"
     )
+    shipment_number_2 = fields.Char(
+        string="Numéro de Colis 2",
+        readonly=True,
+        tracking=True,
+        help="Numéro de suivi du deuxième colis (entrepôt 2)"
+    )
 
     label_url = fields.Char(
         string="URL Étiquette",
@@ -1737,7 +1743,332 @@ class WebsiteOrder(models.Model):
             return 'S000001'
     '''pour deploiement'''
     def action_create_shipment(self):
-        """Create shipment via PostShipping API"""
+        """Create shipment via PostShipping API - one per warehouse"""
+        self.ensure_one()
+
+        if self.status != 'ready_to_delivery':
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Erreur',
+                    'message': 'Le colis ne peut être créé que pour les commandes avec le statut "Prêt à être livré".',
+                    'type': 'warning'
+                }
+            }
+
+        if self.shipment_created:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Info',
+                    'message': f'Un colis a déjà été créé pour cette commande (N°: {self.shipment_number}).',
+                    'type': 'info'
+                }
+            }
+
+        # ── Group lines by WAREHOUSE (first segment of warehouse_availability) ──
+        warehouse_groups = {}
+        for line in self.line_ids:
+            raw = line.warehouse_availability or ''
+            warehouse_key = raw.split(' / ')[0].strip() if raw else 'Inconnu'
+            warehouse_groups.setdefault(warehouse_key, []).append(line)
+
+        total_packages = len(warehouse_groups)
+        if total_packages == 0:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Erreur',
+                    'message': 'Aucune ligne de commande trouvée.',
+                    'type': 'warning'
+                }
+            }
+
+        # ── Sort warehouse_groups by warehouse sequence ──
+        # Higher sequence = colis 1/2 (first), Lower sequence = colis 2/2 (second)
+        warehouses_ordered = self.env['stock.warehouse'].search([], order='sequence desc, id desc')
+        warehouse_sequence_map = {wh.name: wh.sequence for wh in warehouses_ordered}
+
+        sorted_warehouse_groups = sorted(
+            warehouse_groups.items(),
+            key=lambda x: warehouse_sequence_map.get(x[0], 9999),
+            reverse=True  # highest sequence = colis 1
+        )
+
+        url = "https://api.postshipping.com/api2/shipments"
+        headers = {
+            'Content-Type': 'application/json',
+            'Token': '45E6880FBAD104CFA6BBCF9407154187'
+        }
+
+        shipment_numbers = []
+        label_urls = []
+        errors = []
+
+        for pkg_index, (warehouse_name, lines) in enumerate(sorted_warehouse_groups, start=1):
+            pkg_notation = f"{pkg_index}/{total_packages}" if total_packages > 1 else ""
+            pkg_qty = sum(l.quantity for l in lines)
+            pkg_weight = pkg_qty or 1
+
+            # Build a description of lines in this warehouse
+            lines_description = ", ".join(
+                f"{l.product_name or 'Produit'} x{int(l.quantity)}"
+                for l in lines
+            )
+
+            company = self.env.company
+            country_code = company.country_id.code or 'MA'
+            city = company.city or 'Casablanca'
+            postcode = company.zip or '20000'
+            phone = company.phone or '99999999'
+            email = company.email or 'contact@company.com'
+            street = company.street or city
+            street2 = company.street2 or city
+
+            payload = [{
+                "ThirdPartyToken": "",
+                "SenderDetails": {
+                    "SenderName": company.name,
+                    "SenderCompanyName": company.name,
+                    "SenderCountryCode": country_code,
+                    "SenderAdd1": street,
+                    "SenderAdd2": street2,
+                    "SenderAdd3": "",
+                    "SenderAddCity": city,
+                    "SenderAddState": city,
+                    "SenderAddPostcode": postcode,
+                    "SenderPhone": phone,
+                    "SenderEmail": email,
+                    "SenderFax": "",
+                    "SenderKycType": "Passport",
+                    "SenderKycNumber": "P00001",
+                    "SenderReceivingCountryTaxID": ""
+                },
+                "ReceiverDetails": {
+                    "ReceiverName": self.client_name or "Client",
+                    "ReceiverCompanyName": self.client_name or "Client",
+                    "ReceiverCountryCode": "MA",
+                    "ReceiverAdd1": self.adresse or "Address",
+                    "ReceiverAdd2": self.second_adresse or "",
+                    "ReceiverAdd3": "",
+                    "ReceiverAddCity": self.city or "Casablanca",
+                    "ReceiverAddState": self.city or "Casablanca",
+                    "ReceiverAddPostcode": self.postcode or "20000",
+                    "ReceiverMobile": self.mobile or self.phone or "0600000000",
+                    "ReceiverPhone": self.phone or self.mobile or "0600000000",
+                    "ReceiverEmail": self.email or "client@example.com",
+                    "ReceiverAddResidential": "N",
+                    "ReceiverFax": "",
+                    "ReceiverKycType": "Passport",
+                    "ReceiverKycNumber": "P00005"
+                },
+                "PackageDetails": {
+                    "GoodsDescription": f"Commande {self.reference} - N° {pkg_notation}" if pkg_notation else f"Commande {self.reference}",
+                    "CustomValue": "",
+                    "CustomCurrencyCode": "",
+                    "InsuranceValue": "",
+                    "InsuranceCurrencyCode": "",
+                    "ShipmentTerm": "",
+                    "GoodsOriginCountryCode": "",
+                    "DeliveryInstructions": "Livraison commande e-commerce",
+                    "Weight": pkg_weight,
+                    "WeightMeasurement": "KG",
+                    "NoOfItems": int(pkg_qty),
+                    "ServiceTypeName": "EN",
+                    "BookPickUP": False,
+                    "AlternateRef": "",
+                    "SenderRef1": self.reference or self.ticket_id,
+                    "SenderRef2": "",
+                    "SenderRef3": "",
+                    "DeliveryAgentCode": "",
+                    "DeliveryRouteCode": "",
+                    "BusinessType": "B2C",
+                    "ShipmentResponseItem": [{
+                        "ItemAlt": "",
+                        "ItemWeight": pkg_weight,
+                        "ItemCubicWeight": 0,
+                        "ItemDescription": lines_description,
+                        "ItemCustomValue": 0.00,
+                        "ItemCustomCurrencyCode": "",
+                        # ── X/Y notation in Notes ──
+                        "Notes": f"Commande {self.reference or self.ticket_id} {pkg_notation}".strip(),
+                        "Pieces": [{
+                            "HarmonisedCode": "hs001",
+                            "GoodsDescription": "Produits e-commerce",
+                            "Content": lines_description,
+                            "Notes": f"Colis {pkg_notation} - Entrepôt: {warehouse_name}".strip(" -"),
+                            "SenderRef1": self.reference,
+                            "Quantity": int(pkg_qty),
+                            "Weight": pkg_weight,
+                            "ManufactureCountryCode": "",
+                            "OriginCountryCode": "",
+                            "CurrencyCode": "",
+                        }]
+                    }],
+                    "CODAmount": 0.0,
+                    "CODCurrencyCode": "MAD",
+                    "Bag": 0,
+                    # ── X/Y notation in top-level Notes ──
+                    "Notes": f"Commande {self.reference or self.ticket_id} {pkg_notation}".strip(),
+                    "OriginLocCode": "",
+                    "BagNumber": 0,
+                    "DeadWeight": pkg_weight,
+                    "ReasonExport": "",
+                    "DestTaxes": 0.0,
+                    "Security": 0.0,
+                    "Surcharge": 0.0,
+                    "ReceiverTaxID": "",
+                    "OrderNumber": self.ticket_id,
+                    "Incoterms": "CIF",
+                    "ClearanceReference": ""
+                },
+                "PickupDetails": {
+                    "ReadyTime": fields.Datetime.now().strftime("%Y/%m/%d 09:00:00"),
+                    "CloseTime": fields.Datetime.now().strftime("%Y/%m/%d 18:00:00"),
+                    "SpecialInstructions": f"Pickup colis {pkg_notation} - {warehouse_name}".strip(" -"),
+                    "Address1": "Casablanca",
+                    "Address2": "Casablanca",
+                    "Address3": "",
+                    "AddressState": "Casablanca",
+                    "AddressCity": "Casablanca",
+                    "AddressPostalCode": "20000",
+                    "AddressCountryCode": "MA"
+                }
+            }]
+
+            try:
+                _logger.info(
+                    f"Creating shipment {pkg_notation or '1/1'} for order {self.ticket_id} - Warehouse: {warehouse_name}")
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+
+                if result and len(result) > 0:
+                    shipment_data = result[0]
+                    if shipment_data.get('ShipmentNumber'):
+                        shipment_numbers.append(shipment_data['ShipmentNumber'])
+                        if shipment_data.get('LabelURL'):
+                            label_urls.append(shipment_data['LabelURL'])
+
+                        self.message_post(
+                            body=(
+                                f"Colis <b>{pkg_notation or '1/1'}</b> créé — Entrepôt: <b>{warehouse_name}</b><br/>"
+                                f"Numéro de colis: <b>{shipment_data['ShipmentNumber']}</b><br/>"
+                                f"Produits: {lines_description}<br/>"
+                            )
+                        )
+                    else:
+                        error_msg = shipment_data.get('ErrMessage', 'Erreur inconnue')
+                        errors.append(f"Colis {pkg_notation or '1/1'} ({warehouse_name}): {error_msg}")
+                        _logger.error(f"Shipment {pkg_notation} failed: {error_msg}")
+            except Exception as e:
+                errors.append(f"Colis {pkg_notation or '1/1'} ({warehouse_name}): {str(e)}")
+                _logger.error(f"Error creating shipment {pkg_notation}: {str(e)}")
+
+        # ── Persist results ──
+        if shipment_numbers:
+            self.write({
+                'shipment_number': shipment_numbers[0],
+                'shipment_number_2': shipment_numbers[1] if len(shipment_numbers) > 1 else False,
+                'label_url': ', '.join(label_urls),
+                'shipment_created': True,
+                'status': 'en_cours_de_livraison'
+            })
+
+        # ── Return notification ──
+        if errors and not shipment_numbers:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Erreur',
+                    'message': '\n'.join(errors),
+                    'type': 'danger'
+                }
+            }
+        elif errors:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Succès partiel',
+                    'message': f"{len(shipment_numbers)}/{total_packages} colis créés. Erreurs: {'; '.join(errors)}",
+                    'type': 'warning',
+                    'sticky': True
+                }
+            }
+        else:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Succès',
+                    'message': f"{total_packages} colis créés: {', '.join(shipment_numbers)}",
+                    'type': 'success',
+                    'sticky': True
+                }
+            }
+
+    def action_print_label(self):
+        """Open first label URL - Espagne"""
+        self.ensure_one()
+
+        if not self.label_url:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Erreur',
+                    'message': "Aucune étiquette disponible. Veuillez d'abord créer le colis.",
+                    'type': 'warning'
+                }
+            }
+
+        first_url = self.label_url.split(',')[0].strip()
+        return {
+            'type': 'ir.actions.act_url',
+            'url': first_url,
+            'target': 'new',
+        }
+
+    def action_print_label_2(self):
+        """Open second label URL - Maroc"""
+        self.ensure_one()
+
+        if not self.label_url:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Erreur',
+                    'message': "Aucune étiquette disponible pour le deuxième colis.",
+                    'type': 'warning'
+                }
+            }
+
+        urls = [u.strip() for u in self.label_url.split(',') if u.strip()]
+
+        if len(urls) < 2:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Erreur',
+                    'message': "Aucune étiquette disponible pour le deuxième colis.",
+                    'type': 'warning'
+                }
+            }
+
+        return {
+            'type': 'ir.actions.act_url',
+            'url': urls[1],
+            'target': 'new',
+        }
+    '''
+    def action_create_shipment(self):
         self.ensure_one()
 
         if self.status != 'ready_to_delivery':
@@ -1980,7 +2311,6 @@ class WebsiteOrder(models.Model):
             }
 
     def action_print_label(self):
-        """Open label URL in new window"""
         self.ensure_one()
 
         if not self.label_url:
@@ -1999,7 +2329,9 @@ class WebsiteOrder(models.Model):
             'url': self.label_url,
             'target': 'new',
         }
+    '''
     '''pour deploiement'''
+
     def action_open_tracking(self):
         self.ensure_one()
 
