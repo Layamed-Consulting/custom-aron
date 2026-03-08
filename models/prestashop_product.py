@@ -2457,15 +2457,16 @@ class WebsiteOrder(models.Model):
             try:
                 sale_order.action_confirm()
                 sale_orders_created.append(sale_order.name)
-                _logger.info(f"Sale order {sale_order.name} confirmed for warehouse {warehouse_name}")
+                _logger.info(f"✅ Sale order {sale_order.name} confirmed for warehouse {warehouse_name}")
             except Exception as e:
-                _logger.error(f"Failed to confirm sale order for warehouse {warehouse_name}: {str(e)}")
+                _logger.error(f"❌ Failed to confirm sale order for warehouse {warehouse_name}: {str(e)}")
                 continue
 
         # Update website order status
         if sale_orders_created:
             order.write({
                 'status': 'en_cours_preparation',
+                'sale_order_ref': ', '.join(sale_orders_created),
             })
 
             # Post message with all sale orders created
@@ -2967,6 +2968,103 @@ class WebsiteOrder(models.Model):
     def cron_check_sale_order_ref_status(self):
         """Cron to check status in stock picking model and get package destination."""
 
+        orders = self.search([
+            ('status', '=', 'en_cours_preparation'),
+            ('sale_order_ref', '!=', False),
+        ])
+
+        if not orders:
+            _logger.info("[CRON] No orders found in en_cours_preparation.")
+            return True
+
+        _logger.info(f"[CRON] Checking status for {len(orders)} orders...")
+
+        Picking = self.env['stock.picking']
+        PickingBatch = self.env['stock.picking.batch']
+        StockMoveLine = self.env['stock.move.line']
+
+        for order in orders:
+
+            # ── Parse ALL sale order refs (e.g. "S00002, S00003") ──
+            refs = [r.strip() for r in order.sale_order_ref.split(',') if r.strip()]
+
+            if not refs:
+                _logger.info(f"[CRON] No refs found for order {order.ticket_id}")
+                continue
+
+            _logger.info(f"[CRON] Order {order.ticket_id}: checking refs {refs}")
+
+            # ── Find ALL pickings for ALL refs ──
+            all_pickings = Picking.search([('origin', 'in', refs)])
+
+            if not all_pickings:
+                _logger.info(f"[CRON] No pickings found for refs {refs}")
+                continue
+
+            _logger.info(f"[CRON] Order {order.ticket_id}: found {len(all_pickings)} picking(s)")
+
+            # ── Collect package destinations from ALL pickings ──
+            all_package_names = []
+
+            for picking in all_pickings:
+                picking_name = picking.name
+                batch_id = picking.batch_id
+
+                _logger.info(f"[CRON] Checking picking {picking_name}, batch={batch_id.name if batch_id else 'None'}")
+
+                if batch_id:
+                    picking_batch = PickingBatch.search([
+                        ('name', 'ilike', batch_id.name)
+                    ], limit=1)
+
+                    if picking_batch:
+                        move_lines = StockMoveLine.search([
+                            ('picking_id', '=', picking.id),
+                            ('result_package_id', '!=', False)
+                        ])
+
+                        for move_line in move_lines:
+                            if move_line.result_package_id and move_line.result_package_id.name:
+                                package_name = move_line.result_package_id.name
+                                if package_name not in all_package_names:
+                                    all_package_names.append(package_name)
+                    else:
+                        _logger.info(f"[CRON] No batch found for batch_id: {batch_id.name}")
+                else:
+                    _logger.info(f"[CRON] Picking {picking_name}: no batch_id")
+
+            # ── Update colis_destination with packages from ALL pickings ──
+            if all_package_names:
+                colis_value = ', '.join(all_package_names)
+                order.colis_destination = colis_value
+                _logger.info(f"[CRON] Order {order.ticket_id}: colis_destination = {colis_value}")
+            else:
+                _logger.info(f"[CRON] Order {order.ticket_id}: no packages found across all pickings")
+
+            # ── Only mark commande_prepare if ALL pickings are done ──
+            all_done = all(p.state == 'done' for p in all_pickings)
+            any_done = any(p.state == 'done' for p in all_pickings)
+
+            picking_states = ', '.join(f"{p.name}={p.state}" for p in all_pickings)
+            _logger.info(f"[CRON] Order {order.ticket_id}: picking states → {picking_states}")
+
+            if all_done:
+                order.status = 'commande_prepare'
+                _logger.info(
+                    f"[CRON] Order {order.ticket_id}: ALL {len(all_pickings)} picking(s) done → commande_prepare"
+                )
+            elif any_done:
+                _logger.info(
+                    f"[CRON] Order {order.ticket_id}: only SOME pickings done, waiting for the rest..."
+                )
+            else:
+                _logger.info(
+                    f"[CRON] Order {order.ticket_id}: no pickings done yet"
+                )
+
+        return True
+    ''' lundi
+    def cron_check_sale_order_ref_status(self):
         # Only take orders in 'en_cours_preparation'
         orders = self.search([
             ('status', '=', 'en_cours_preparation'),
@@ -3059,7 +3157,7 @@ class WebsiteOrder(models.Model):
                 )
 
         return True
-
+    '''
     @api.model
     def cron_check_sale_order_invoice_status(self):
         """Cron to check if related sale order is fully invoiced."""
