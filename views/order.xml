@@ -17,7 +17,8 @@
                 <field name="client_name"/>
                 <field name="payment_method"/>
                 <field name="total_qty"/>
-                <field name="batch_number"/>
+                <!--
+                <field name="batch_number"/> -->
                 <field name="colis_destination"/>
                 <field name="sale_order_ref" string="Ref. Bon de Commande"/>
                 <field name="status"
@@ -223,6 +224,57 @@
         <field name="res_model">stock.website.order</field>
         <field name="view_mode">tree,form</field>
         <field name="context">{}</field>
+    </record>
+    <!-- Search View for Orders -->
+    <record id="view_stock_website_order_search" model="ir.ui.view">
+        <field name="name">stock.website.order.search</field>
+        <field name="model">stock.website.order</field>
+        <field name="arch" type="xml">
+            <search string="Rechercher Commandes">
+                <!-- Search Fields -->
+                <field name="ticket_id" string="Ticket ID"/>
+                <field name="reference" string="Référence"/>
+                <field name="client_name" string="Client"/>
+                <field name="shipment_number" string="N° Colis"/>
+
+                <!-- Filters -->
+                <filter string="En cours de traitement" name="en_cours_traitement"
+                        domain="[('status', '=', 'en_cours_traitement')]"/>
+                <filter string="En cours de préparation" name="en_cours_preparation"
+                        domain="[('status', '=', 'en_cours_preparation')]"/>
+                <filter string="Commande préparée" name="commande_prepare"
+                        domain="[('status', '=', 'commande_prepare')]"/>
+                <filter string="Prêt à livrer" name="ready_to_delivery"
+                        domain="[('status', '=', 'ready_to_delivery')]"/>
+                <filter string="En cours de livraison" name="en_cours_livraison"
+                        domain="[('status', '=', 'en_cours_de_livraison')]"/>
+                <filter string="Livré" name="delivered"
+                        domain="[('status', '=', 'delivered')]"/>
+                <filter string="Annulé" name="annuler"
+                        domain="[('status', '=', 'annuler')]"/>
+
+                <separator/>
+
+                <filter string="Colis créé" name="shipment_created"
+                        domain="[('shipment_created', '=', True)]"/>
+                <filter string="Colis non créé" name="shipment_not_created"
+                        domain="[('shipment_created', '=', False)]"/>
+
+                <separator/>
+
+                <filter string="Aujourd'hui" name="today"
+                        domain="[('date_commande', '>=', datetime.datetime.now().strftime('%Y-%m-%d 00:00:00')),
+                                  ('date_commande', '&lt;=', datetime.datetime.now().strftime('%Y-%m-%d 23:59:59'))]"/>
+
+                <!-- Group By -->
+                <group expand="0" string="Grouper par">
+                    <filter string="Statut" name="group_status" context="{'group_by': 'status'}"/>
+                    <filter string="Client" name="group_client" context="{'group_by': 'client_name'}"/>
+                    <filter string="Date" name="group_date" context="{'group_by': 'date_commande:month'}"/>
+                    <filter string="Destination" name="group_destination" context="{'group_by': 'colis_destination'}"/>
+                </group>
+            </search>
+        </field>
     </record>
 
     <menuitem id="menu_stock_website_root" name="Prestashop" parent="sale.sale_menu_root"/>
