@@ -1827,7 +1827,7 @@ class WebsiteOrder(models.Model):
             email = company.email or 'contact@company.com'
             street = company.street or city
             street2 = company.street2 or city
-
+            nbsp = '\xa0'
             payload = [{
                 "ThirdPartyToken": "",
                 "SenderDetails": {
@@ -1866,7 +1866,7 @@ class WebsiteOrder(models.Model):
                     "ReceiverKycNumber": "P00005"
                 },
                 "PackageDetails": {
-                    "GoodsDescription": f"Commande {self.reference} - N° {pkg_notation}" if pkg_notation else f"Commande {self.reference}",
+                    "GoodsDescription": f"#Commande {self.reference}{nbsp * 20}{pkg_notation}" if pkg_notation else f"Commande {self.reference}",
                     "CustomValue": "",
                     "CustomCurrencyCode": "",
                     "InsuranceValue": "",
@@ -1880,7 +1880,7 @@ class WebsiteOrder(models.Model):
                     "ServiceTypeName": "EN",
                     "BookPickUP": False,
                     "AlternateRef": "",
-                    "SenderRef1": self.reference or self.ticket_id,
+                    "SenderRef1": f"#Colis ***{pkg_notation}***" if pkg_notation else f"Commande {self.reference}",
                     "SenderRef2": "",
                     "SenderRef3": "",
                     "DeliveryAgentCode": "",
