@@ -247,6 +247,7 @@ class ProductTemplate(models.Model):
             _logger.error(f"Error creating category: {str(e)}")
             return None
 
+    '''
     def _get_product_categories(self):
         """Get all categories from Odoo product (including parent hierarchy)"""
         category_ids = []
@@ -273,7 +274,37 @@ class ProductTemplate(models.Model):
             category_ids.append(2)
 
         return category_ids
+    '''
+    def _get_product_categories(self):
+        """Get all categories from Odoo product with correct parent hierarchy"""
+        if not self.categ_id:
+            return [2]  # Default to Home category
 
+        # ── Build the full path from root to leaf ──
+        # e.g. [All, A, B, C] → we skip 'All' and 'All / Saleable'
+        hierarchy = []
+        current = self.categ_id
+        while current and current.name not in ['All', 'All / Saleable']:
+            hierarchy.insert(0, current)  # prepend to get root → leaf order
+            current = current.parent_id
+
+        if not hierarchy:
+            return [2]
+
+        # ── Walk from root to leaf, creating each level with correct parent ──
+        parent_ps_id = 2  # Start from PrestaShop Home category
+        category_ids = [2]
+
+        for odoo_category in hierarchy:
+            ps_id = self._get_or_create_prestashop_category(
+                odoo_category.name,
+                parent_id=parent_ps_id  # each level gets the previous level as parent
+            )
+            if ps_id and ps_id not in category_ids:
+                category_ids.append(ps_id)
+            parent_ps_id = ps_id  # next level's parent = current level's PS ID
+
+        return category_ids
     def _prepare_product_xml(self, product):
         """Prepare XML data for a single product"""
         # default brand
