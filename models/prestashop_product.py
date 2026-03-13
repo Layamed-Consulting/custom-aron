@@ -1773,6 +1773,115 @@ class WebsiteOrder(models.Model):
         except:
             return 'S000001'
     '''pour deploiement'''
+    def cron_archive_products_en_cours_livraison(self):
+        """
+        Clean package: remove quants from colis_destination package
+        matching order products. Triggered on label print.
+        """
+        self.ensure_one()
+
+        if not self.colis_destination:
+            _logger.info(f"[CLEAN PACKAGE] Order {self.ticket_id}: no colis_destination, skipping")
+            return
+
+        if self.status != 'en_cours_de_livraison':
+            _logger.info(f"[CLEAN PACKAGE] Order {self.ticket_id}: status is '{self.status}', skipping")
+            return
+
+        StockQuantPackage = self.env['stock.quant.package']
+        StockQuant = self.env['stock.quant']
+
+        # ── Parse all package names (comma separated) ──
+        package_names = [
+            p.strip()
+            for p in self.colis_destination.split(',')
+            if p.strip()
+        ]
+
+        if not package_names:
+            _logger.info(f"[CLEAN PACKAGE] Order {self.ticket_id}: no package names found")
+            return
+
+        # ── Get product IDs from order lines ──
+        order_product_ids = self.line_ids.mapped('product_id').ids
+
+        if not order_product_ids:
+            _logger.info(f"[CLEAN PACKAGE] Order {self.ticket_id}: no products in order lines")
+            return
+
+        _logger.info(
+            f"[CLEAN PACKAGE] Order {self.ticket_id}: "
+            f"packages={package_names}, products={order_product_ids}"
+        )
+
+        cleaned_products = []
+        not_found_packages = []
+
+        for package_name in package_names:
+            # ── Find package by name ──
+            package = StockQuantPackage.search([
+                ('name', '=', package_name)
+            ], limit=1)
+
+            if not package:
+                _logger.warning(
+                    f"[CLEAN PACKAGE] Order {self.ticket_id}: "
+                    f"package '{package_name}' not found"
+                )
+                not_found_packages.append(package_name)
+                continue
+
+            # ── Find quants inside this package matching order products ──
+            matching_quants = StockQuant.search([
+                ('package_id', '=', package.id),
+                ('product_id', 'in', order_product_ids),
+            ])
+
+            if not matching_quants:
+                _logger.info(
+                    f"[CLEAN PACKAGE] Order {self.ticket_id}: "
+                    f"no matching quants in package '{package_name}'"
+                )
+                continue
+
+            # ── Collect names before deleting for logging ──
+            for quant in matching_quants:
+                cleaned_products.append(
+                    f"{quant.product_id.display_name} (qty: {quant.quantity})"
+                )
+
+            # ── DELETE quants from package ──
+            matching_quants.sudo().unlink()
+
+            _logger.info(
+                f"[CLEAN PACKAGE] Order {self.ticket_id}: "
+                f"removed {len(matching_quants)} quant(s) from package '{package_name}'"
+            )
+
+            # ── Log if package is now empty ──
+            remaining_quants = StockQuant.search([('package_id', '=', package.id)])
+            if not remaining_quants:
+                _logger.info(f"[CLEAN PACKAGE] Package '{package_name}' is now empty and ready for reuse")
+
+        # ── Post chatter message ──
+        if cleaned_products:
+            self.message_post(
+                body=(
+                        f"Produits supprimés du colis (package nettoyé):<br/>"
+                )
+            )
+        if not_found_packages:
+            self.message_post(
+                body=(
+                    f"Colis introuvables "
+                    f"{', '.join(not_found_packages)}"
+                )
+            )
+
+        _logger.info(
+            f"[CLEAN PACKAGE] Order {self.ticket_id}: "
+            f"done — {len(cleaned_products)} quant(s) removed"
+        )
     def action_create_shipment(self):
         """Create shipment via PostShipping API - one per warehouse"""
         self.ensure_one()
@@ -2057,7 +2166,7 @@ class WebsiteOrder(models.Model):
                     'type': 'warning'
                 }
             }
-
+        self.cron_archive_products_en_cours_livraison()
         first_url = self.label_url.split(',')[0].strip()
         return {
             'type': 'ir.actions.act_url',
@@ -2092,7 +2201,7 @@ class WebsiteOrder(models.Model):
                     'type': 'warning'
                 }
             }
-
+        self.cron_archive_products_en_cours_livraison()
         return {
             'type': 'ir.actions.act_url',
             'url': urls[1],
