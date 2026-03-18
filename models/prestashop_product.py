@@ -3189,7 +3189,7 @@ class WebsiteOrder(models.Model):
             _logger.info(f"[CRON] Order {order.ticket_id}: picking states → {picking_states}")
 
             if all_done:
-                order.status = 'commande_prepare'
+                order.status = 'ready_to_delivery'
                 _logger.info(
                     f"[CRON] Order {order.ticket_id}: ALL {len(all_pickings)} picking(s) done → commande_prepare"
                 )
@@ -3438,7 +3438,7 @@ class WebsiteOrder(models.Model):
 
             # Mapping Odoo status to PrestaShop current_state ID
             status_mapping = {
-                'en_cours_de_livraison': 20,
+                'ready_to_delivery': 20,
                 'delivered': 5,
                 'annuler':6,
             }
@@ -3749,98 +3749,386 @@ class WebsiteOrder(models.Model):
             _logger.error(f"Error extracting tracking event: {e}")
             return None
 
+    '''invoice prestashop'''
     @api.model
     def cron_update_invoice_names(self):
-        """Cron to fetch invoice IDs from PrestaShop and update invoice names in Odoo"""
-        _logger.info("[CRON INVOICE] Starting invoice name update process...")
+        """Cron: Push Odoo invoice number + update order status to 23 in PrestaShop"""
+        _logger.info("[CRON] Starting invoice number + status sync to PrestaShop...")
 
-        # Get orders in 'en_cours_de_livraison' status
+        # ── Get orders in 'en_cours_de_livraison' status ──
         orders = self.search([
-            ('status', '=', 'en_cours_de_livraison'),
+            ('status', '=', 'ready_to_delivery'),
             ('reference', '!=', False),
             ('ticket_id', '!=', False),
         ])
 
         if not orders:
-            _logger.info("[CRON INVOICE] No orders found in 'en_cours_de_livraison' status")
+            _logger.info("my table No orders found in 'en_cours_de_livraison' status")
             return True
 
-        _logger.info(f"[CRON INVOICE] Found {len(orders)} orders to process")
+        _logger.info(f"[CRON] Found {len(orders)} orders to process")
 
         AccountMove = self.env['account.move']
         updated_count = 0
         error_count = 0
+        NEW_STATE_ID = 21
 
         for order in orders:
             try:
-                # Get the order ID (ticket_id is the PrestaShop order ID)
                 prestashop_order_id = order.ticket_id
 
-                # Call PrestaShop API to get invoice ID
-                api_url = f"{self.BASE_URL}/order_invoices?filter[id_order]={prestashop_order_id}"
+                # ════════════════════════════════════════════
+                # PART 1 — Find Odoo invoice number
+                # ════════════════════════════════════════════
 
-                _logger.info(f"[CRON INVOICE] Fetching invoice for order {prestashop_order_id}: {api_url}")
+                invoice = AccountMove.search([
+                    ('ref', 'ilike', order.reference),
+                    ('x_studio_synchronise', '=', 0),
+                ], limit=1)
 
-                response = requests.get(
-                    api_url,
+                if not invoice:
+                    _logger.warning(f"compta table No invoice found in Odoo for reference {order.reference}")
+                    continue
+
+                invoice_name = invoice.name  # e.g. FAC/2026/00026
+                parts = invoice_name.split('/')
+                if len(parts) < 3:
+                    _logger.warning(f"[CRON] Unexpected invoice name format: {invoice_name}")
+                    continue
+
+                odoo_invoice_number = int(parts[2])  # "00026" → 26
+                _logger.info(f"[CRON] Extracted invoice number: {odoo_invoice_number} from {invoice_name}")
+
+                # ════════════════════════════════════════════
+                # PART 2 — GET full order from PrestaShop
+                # ════════════════════════════════════════════
+
+                get_order_response = requests.get(
+                    f"{self.BASE_URL}/orders/{prestashop_order_id}",
+                    auth=(self.WS_KEY, ""),
+                    timeout=60
+                )
+
+                if get_order_response.status_code != 200:
+                    _logger.error(
+                        f"[CRON] Failed to GET order {prestashop_order_id}: "
+                        f"{get_order_response.status_code}"
+                    )
+                    error_count += 1
+                    continue
+
+                order_root = ET.fromstring(get_order_response.content)
+                order_data = order_root.find('order')
+
+                if order_data is None:
+                    _logger.error(f"[CRON] Could not parse order XML for ID {prestashop_order_id}")
+                    error_count += 1
+                    continue
+
+                # ── Read all order fields ──
+                id_address_delivery = order_data.findtext('id_address_delivery')
+                id_address_invoice = order_data.findtext('id_address_invoice')
+                id_cart = order_data.findtext('id_cart')
+                id_currency = order_data.findtext('id_currency')
+                id_lang = order_data.findtext('id_lang')
+                id_customer = order_data.findtext('id_customer')
+                id_carrier = order_data.findtext('id_carrier')
+                module = order_data.findtext('module')
+                invoice_number_ps = order_data.findtext('invoice_number')
+                invoice_date = order_data.findtext('invoice_date')
+                delivery_number = order_data.findtext('delivery_number')
+                delivery_date = order_data.findtext('delivery_date')
+                valid = order_data.findtext('valid')
+                date_add = order_data.findtext('date_add')
+                shipping_number = order_data.findtext('shipping_number')
+                note = order_data.findtext('note') or ''
+                id_shop_group = order_data.findtext('id_shop_group')
+                id_shop = order_data.findtext('id_shop')
+                secure_key = order_data.findtext('secure_key')
+                payment = order_data.findtext('payment')
+                recyclable = order_data.findtext('recyclable')
+                gift = order_data.findtext('gift')
+                gift_message = order_data.findtext('gift_message') or ''
+                mobile_theme = order_data.findtext('mobile_theme')
+                total_discounts = order_data.findtext('total_discounts')
+                total_discounts_tax_incl = order_data.findtext('total_discounts_tax_incl')
+                total_discounts_tax_excl = order_data.findtext('total_discounts_tax_excl')
+                total_paid = order_data.findtext('total_paid')
+                total_paid_tax_incl = order_data.findtext('total_paid_tax_incl')
+                total_paid_tax_excl = order_data.findtext('total_paid_tax_excl')
+                total_paid_real = order_data.findtext('total_paid_real')
+                total_products = order_data.findtext('total_products')
+                total_products_wt = order_data.findtext('total_products_wt')
+                total_shipping = order_data.findtext('total_shipping')
+                total_shipping_tax_incl = order_data.findtext('total_shipping_tax_incl')
+                total_shipping_tax_excl = order_data.findtext('total_shipping_tax_excl')
+                carrier_tax_rate = order_data.findtext('carrier_tax_rate')
+                total_wrapping = order_data.findtext('total_wrapping')
+                total_wrapping_tax_incl = order_data.findtext('total_wrapping_tax_incl')
+                total_wrapping_tax_excl = order_data.findtext('total_wrapping_tax_excl')
+                round_mode = order_data.findtext('round_mode')
+                round_type = order_data.findtext('round_type')
+                conversion_rate = order_data.findtext('conversion_rate')
+                reference = order_data.findtext('reference')
+
+                # ── Build order_rows XML ──
+                order_rows_xml = ""
+                for row in order_data.findall('.//order_row'):
+                    row_id = row.findtext('id')
+                    product_id = row.findtext('product_id')
+                    product_attribute_id = row.findtext('product_attribute_id')
+                    product_quantity = row.findtext('product_quantity')
+                    product_name = row.findtext('product_name')
+                    product_reference = row.findtext('product_reference')
+                    product_ean13 = row.findtext('product_ean13') or ''
+                    product_isbn = row.findtext('product_isbn') or ''
+                    product_upc = row.findtext('product_upc') or ''
+                    product_price = row.findtext('product_price')
+                    id_customization = row.findtext('id_customization')
+                    unit_price_tax_incl = row.findtext('unit_price_tax_incl')
+                    unit_price_tax_excl = row.findtext('unit_price_tax_excl')
+
+                    order_rows_xml += f"""
+                  <order_row>
+                    <id><![CDATA[{row_id}]]></id>
+                    <product_id><![CDATA[{product_id}]]></product_id>
+                    <product_attribute_id><![CDATA[{product_attribute_id}]]></product_attribute_id>
+                    <product_quantity><![CDATA[{product_quantity}]]></product_quantity>
+                    <product_name><![CDATA[{product_name}]]></product_name>
+                    <product_reference><![CDATA[{product_reference}]]></product_reference>
+                    <product_ean13><![CDATA[{product_ean13}]]></product_ean13>
+                    <product_isbn><![CDATA[{product_isbn}]]></product_isbn>
+                    <product_upc><![CDATA[{product_upc}]]></product_upc>
+                    <product_price><![CDATA[{product_price}]]></product_price>
+                    <id_customization><![CDATA[{id_customization}]]></id_customization>
+                    <unit_price_tax_incl><![CDATA[{unit_price_tax_incl}]]></unit_price_tax_incl>
+                    <unit_price_tax_excl><![CDATA[{unit_price_tax_excl}]]></unit_price_tax_excl>
+                  </order_row>"""
+
+                # ════════════════════════════════════════════
+                # PART 3 — PUT updated order (status → 23)
+                # ════════════════════════════════════════════
+
+                order_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+          <order>
+            <id><![CDATA[{prestashop_order_id}]]></id>
+            <id_address_delivery><![CDATA[{id_address_delivery}]]></id_address_delivery>
+            <id_address_invoice><![CDATA[{id_address_invoice}]]></id_address_invoice>
+            <id_cart><![CDATA[{id_cart}]]></id_cart>
+            <id_currency><![CDATA[{id_currency}]]></id_currency>
+            <id_lang><![CDATA[{id_lang}]]></id_lang>
+            <id_customer><![CDATA[{id_customer}]]></id_customer>
+            <id_carrier><![CDATA[{id_carrier}]]></id_carrier>
+            <current_state><![CDATA[{NEW_STATE_ID}]]></current_state>
+            <module><![CDATA[{module}]]></module>
+            <invoice_number><![CDATA[{invoice_number_ps}]]></invoice_number>
+            <invoice_date><![CDATA[{invoice_date}]]></invoice_date>
+            <delivery_number><![CDATA[{delivery_number}]]></delivery_number>
+            <delivery_date><![CDATA[{delivery_date}]]></delivery_date>
+            <valid><![CDATA[{valid}]]></valid>
+            <date_add><![CDATA[{date_add}]]></date_add>
+            <shipping_number><![CDATA[{shipping_number}]]></shipping_number>
+            <note><![CDATA[{note}]]></note>
+            <id_shop_group><![CDATA[{id_shop_group}]]></id_shop_group>
+            <id_shop><![CDATA[{id_shop}]]></id_shop>
+            <secure_key><![CDATA[{secure_key}]]></secure_key>
+            <payment><![CDATA[{payment}]]></payment>
+            <recyclable><![CDATA[{recyclable}]]></recyclable>
+            <gift><![CDATA[{gift}]]></gift>
+            <gift_message><![CDATA[{gift_message}]]></gift_message>
+            <mobile_theme><![CDATA[{mobile_theme}]]></mobile_theme>
+            <total_discounts><![CDATA[{total_discounts}]]></total_discounts>
+            <total_discounts_tax_incl><![CDATA[{total_discounts_tax_incl}]]></total_discounts_tax_incl>
+            <total_discounts_tax_excl><![CDATA[{total_discounts_tax_excl}]]></total_discounts_tax_excl>
+            <total_paid><![CDATA[{total_paid}]]></total_paid>
+            <total_paid_tax_incl><![CDATA[{total_paid_tax_incl}]]></total_paid_tax_incl>
+            <total_paid_tax_excl><![CDATA[{total_paid_tax_excl}]]></total_paid_tax_excl>
+            <total_paid_real><![CDATA[{total_paid_real}]]></total_paid_real>
+            <total_products><![CDATA[{total_products}]]></total_products>
+            <total_products_wt><![CDATA[{total_products_wt}]]></total_products_wt>
+            <total_shipping><![CDATA[{total_shipping}]]></total_shipping>
+            <total_shipping_tax_incl><![CDATA[{total_shipping_tax_incl}]]></total_shipping_tax_incl>
+            <total_shipping_tax_excl><![CDATA[{total_shipping_tax_excl}]]></total_shipping_tax_excl>
+            <carrier_tax_rate><![CDATA[{carrier_tax_rate}]]></carrier_tax_rate>
+            <total_wrapping><![CDATA[{total_wrapping}]]></total_wrapping>
+            <total_wrapping_tax_incl><![CDATA[{total_wrapping_tax_incl}]]></total_wrapping_tax_incl>
+            <total_wrapping_tax_excl><![CDATA[{total_wrapping_tax_excl}]]></total_wrapping_tax_excl>
+            <round_mode><![CDATA[{round_mode}]]></round_mode>
+            <round_type><![CDATA[{round_type}]]></round_type>
+            <conversion_rate><![CDATA[{conversion_rate}]]></conversion_rate>
+            <reference><![CDATA[{reference}]]></reference>
+            <associations>
+              <order_rows nodeType="order_row" virtualEntity="true">
+                {order_rows_xml}
+              </order_rows>
+            </associations>
+          </order>
+        </prestashop>"""
+
+                put_order_response = requests.put(
+                    f"{self.BASE_URL}/orders/{prestashop_order_id}",
+                    auth=(self.WS_KEY, ""),
+                    headers={"Content-Type": "application/xml"},
+                    data=order_xml.encode('utf-8'),
+                    timeout=60
+                )
+
+                if put_order_response.status_code not in [200, 201]:
+                    _logger.error(
+                        f"[CRON] Failed to update order status {prestashop_order_id}: "
+                        f"{put_order_response.status_code} - {put_order_response.text[:300]}"
+                    )
+                    error_count += 1
+                    continue
+
+                _logger.info(
+                    f"[CRON] Order {prestashop_order_id} status updated to {NEW_STATE_ID}"
+                )
+
+                # ════════════════════════════════════════════
+                # PART 4 — GET order_invoice from PrestaShop
+                # ════════════════════════════════════════════
+
+                list_response = requests.get(
+                    f"{self.BASE_URL}/order_invoices",
+                    auth=(self.WS_KEY, ""),
+                    params={'filter[id_order]': prestashop_order_id},
+                    timeout=60
+                )
+
+                if list_response.status_code != 200:
+                    _logger.error(
+                        f"[CRON] Failed to fetch order_invoices for order {prestashop_order_id}: "
+                        f"{list_response.status_code}"
+                    )
+                    error_count += 1
+                    continue
+
+                inv_list_root = ET.fromstring(list_response.content)
+                invoice_elem = inv_list_root.find('.//order_invoice')
+
+                if invoice_elem is None:
+                    _logger.warning(
+                        f"[CRON] No order_invoice found in PrestaShop for order {prestashop_order_id}"
+                    )
+                    continue
+
+                ps_invoice_id = invoice_elem.get('id')
+                if not ps_invoice_id:
+                    _logger.warning(
+                        f"[CRON] order_invoice has no ID for order {prestashop_order_id}"
+                    )
+                    continue
+
+                _logger.info(
+                    f"[CRON] Found PrestaShop invoice ID: {ps_invoice_id} for order {prestashop_order_id}"
+                )
+
+                # ── GET full invoice to preserve all fields ──
+                get_inv_response = requests.get(
+                    f"{self.BASE_URL}/order_invoices/{ps_invoice_id}",
                     auth=(self.WS_KEY, ""),
                     timeout=30
                 )
 
-                if response.status_code == 200:
-                    # Parse XML response
-                    root = ET.fromstring(response.content)
-                    invoice_elem = root.find('.//order_invoice')
+                if get_inv_response.status_code != 200:
+                    _logger.error(
+                        f"[CRON] Failed to fetch order_invoice {ps_invoice_id}: "
+                        f"{get_inv_response.status_code}"
+                    )
+                    error_count += 1
+                    continue
 
-                    if invoice_elem is not None:
-                        invoice_id = invoice_elem.get('id')
+                inv_root = ET.fromstring(get_inv_response.content)
+                inv_data = inv_root.find('order_invoice')
 
-                        if invoice_id:
-                            _logger.info(
-                                f"[CRON INVOICE] Found invoice ID {invoice_id} for order {prestashop_order_id}")
+                if inv_data is None:
+                    _logger.warning(
+                        f"[CRON] Could not parse order_invoice data for ID {ps_invoice_id}"
+                    )
+                    continue
 
-                            # Search for invoice in account.move by reference
-                            invoice = AccountMove.search([
-                                ('ref', 'ilike', order.reference),
-                                ('move_type', '=', 'out_invoice'),
-                            ], limit=1)
+                # ── Read all invoice fields ──
+                inv_id_order = inv_data.findtext('id_order')
+                inv_delivery_number = inv_data.findtext('delivery_number')
+                inv_delivery_date = inv_data.findtext('delivery_date')
+                inv_total_discount_tax_excl = inv_data.findtext('total_discount_tax_excl')
+                inv_total_discount_tax_incl = inv_data.findtext('total_discount_tax_incl')
+                inv_total_paid_tax_excl = inv_data.findtext('total_paid_tax_excl')
+                inv_total_paid_tax_incl = inv_data.findtext('total_paid_tax_incl')
+                inv_total_products = inv_data.findtext('total_products')
+                inv_total_products_wt = inv_data.findtext('total_products_wt')
+                inv_total_shipping_tax_excl = inv_data.findtext('total_shipping_tax_excl')
+                inv_total_shipping_tax_incl = inv_data.findtext('total_shipping_tax_incl')
+                inv_shipping_tax_computation = inv_data.findtext('shipping_tax_computation_method')
+                inv_total_wrapping_tax_excl = inv_data.findtext('total_wrapping_tax_excl')
+                inv_total_wrapping_tax_incl = inv_data.findtext('total_wrapping_tax_incl')
+                inv_shop_address = inv_data.findtext('shop_address')
+                inv_note = inv_data.findtext('note') or ''
+                inv_date_add = inv_data.findtext('date_add')
 
-                            if invoice:
-                                # Generate new invoice name: IN + 6 digits (e.g., IN000039, IN000135)
-                                new_invoice_name = f"IN{invoice_id.zfill(6)}"
+                # ════════════════════════════════════════════
+                # PART 5 — PUT updated invoice number
+                # ════════════════════════════════════════════
 
-                                # Update the invoice name
-                                invoice.write({'name': new_invoice_name})
+                invoice_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        <prestashop xmlns:xlink="http://www.w3.org/1999/xlink">
+          <order_invoice>
+            <id><![CDATA[{ps_invoice_id}]]></id>
+            <id_order><![CDATA[{inv_id_order}]]></id_order>
+            <number><![CDATA[{odoo_invoice_number}]]></number>
+            <delivery_number><![CDATA[{inv_delivery_number}]]></delivery_number>
+            <delivery_date><![CDATA[{inv_delivery_date}]]></delivery_date>
+            <total_discount_tax_excl><![CDATA[{inv_total_discount_tax_excl}]]></total_discount_tax_excl>
+            <total_discount_tax_incl><![CDATA[{inv_total_discount_tax_incl}]]></total_discount_tax_incl>
+            <total_paid_tax_excl><![CDATA[{inv_total_paid_tax_excl}]]></total_paid_tax_excl>
+            <total_paid_tax_incl><![CDATA[{inv_total_paid_tax_incl}]]></total_paid_tax_incl>
+            <total_products><![CDATA[{inv_total_products}]]></total_products>
+            <total_products_wt><![CDATA[{inv_total_products_wt}]]></total_products_wt>
+            <total_shipping_tax_excl><![CDATA[{inv_total_shipping_tax_excl}]]></total_shipping_tax_excl>
+            <total_shipping_tax_incl><![CDATA[{inv_total_shipping_tax_incl}]]></total_shipping_tax_incl>
+            <shipping_tax_computation_method><![CDATA[{inv_shipping_tax_computation}]]></shipping_tax_computation_method>
+            <total_wrapping_tax_excl><![CDATA[{inv_total_wrapping_tax_excl}]]></total_wrapping_tax_excl>
+            <total_wrapping_tax_incl><![CDATA[{inv_total_wrapping_tax_incl}]]></total_wrapping_tax_incl>
+            <shop_address><![CDATA[{inv_shop_address}]]></shop_address>
+            <note><![CDATA[{inv_note}]]></note>
+            <date_add><![CDATA[{inv_date_add}]]></date_add>
+          </order_invoice>
+        </prestashop>"""
 
-                                _logger.info(
-                                    f"[CRON INVOICE] Updated invoice {invoice.id} name to {new_invoice_name} "
-                                    f"for order reference {order.reference}"
-                                )
-                                updated_count += 1
-                            else:
-                                _logger.warning(
-                                    f"[CRON INVOICE] No invoice found in account.move for reference {order.reference}"
-                                )
-                        else:
-                            _logger.warning(f"[CRON INVOICE] No invoice ID in response for order {prestashop_order_id}")
-                    else:
-                        _logger.warning(f"[CRON INVOICE] No invoice element found for order {prestashop_order_id}")
+                put_inv_response = requests.put(
+                    f"{self.BASE_URL}/order_invoices/{ps_invoice_id}",
+                    auth=(self.WS_KEY, ""),
+                    headers={"Content-Type": "application/xml"},
+                    data=invoice_xml.encode('utf-8'),
+                    timeout=30
+                )
+
+                if put_inv_response.status_code in [200, 201]:
+                    _logger.info(
+                        f"[CRON] Invoice {ps_invoice_id} number updated → {odoo_invoice_number} "
+                        f"(from {invoice_name}) for order {prestashop_order_id}"
+                    )
+                    updated_count += 1
+                    invoice.write({'x_studio_synchronise': 1})
                 else:
                     _logger.error(
-                        f"[CRON INVOICE] API request failed for order {prestashop_order_id}: "
-                        f"{response.status_code} - {response.text}"
+                        f"[CRON] Failed to update invoice {ps_invoice_id}: "
+                        f"{put_inv_response.status_code} - {put_inv_response.text[:300]}"
                     )
                     error_count += 1
 
             except Exception as e:
                 error_count += 1
                 _logger.error(
-                    f"[CRON INVOICE] Exception processing order {order.reference}: {str(e)}",
+                    f"[CRON] Exception processing order {order.reference}: {str(e)}",
                     exc_info=True
                 )
 
         _logger.info(
-            f"[CRON INVOICE] Process completed. Updated: {updated_count}, Errors: {error_count}, Total: {len(orders)}"
+            f"[CRON] Completed. Updated: {updated_count}, Errors: {error_count}, "
+            f"Total: {len(orders)}"
         )
 
         return True

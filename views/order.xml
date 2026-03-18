@@ -109,6 +109,7 @@
                         class="btn-info"
                         invisible="not shipment_number_2"
                         icon="fa-print"/>
+                <field name="status" widget="statusbar"/>
                 <!-- Button to print label - only visible when shipment is created
                 <button name="action_print_label"
                         string="Print Label"
