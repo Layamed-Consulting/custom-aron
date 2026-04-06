@@ -447,7 +447,7 @@ class ProductTemplate(models.Model):
                 'tag': 'display_notification',
                 'params': {
                     'title': 'No Products to Export',
-                    'message': f'{skipped_count} products skipped.',
+                    'message': f'{skipped_count} already exported (products skipped).',
                     'type': 'warning',
                     'sticky': False,
                 }
